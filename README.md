@@ -117,7 +117,7 @@ Within that scope, some specifics are worth knowing. Redaction covers the raw
 value, base64 (standard and URL-safe, padded and unpadded, including the
 prefix of a base64 blob when the secret is followed by other bytes),
 percent-encoding (uppercase `%XX` only), the JSON string-escaped form (for
-values containing quotes, backslashes or slashes that get echoed inside a JSON
+values containing quotes, backslashes or control characters that get echoed inside a JSON
 document), and hex in both cases; overlapping matches are merged into
 one marker. It does not cover a secret that is base64-encoded at a non-zero
 offset inside a larger blob, a value printed only in part, or any deliberate

@@ -15,7 +15,7 @@ fn entry(account: &str) -> Result<keyring::Entry> {
 
 fn map_err(err: &keyring::Error) -> Error {
     Error::new(ErrorKind::Keyring(format!(
-        "{err}; is the keychain locked or unavailable (e.g. over SSH)?"
+        "{err}; is the OS keyring locked or unavailable (e.g. over SSH)?"
     )))
 }
 

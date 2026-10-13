@@ -181,7 +181,7 @@ One `Error` struct carries a `Backtrace` and a `#[non_exhaustive]` `ErrorKind`
 index, random, spawn, I/O, no TTY, usage). A timeout is not an error: `run`
 returns normally with `timed_out: true` in its output. MCP maps errors to tool
 results with `isError: true` and a message; messages never include values.
-Keyring failures other than a missing entry get the hint "is the keychain
+Keyring failures other than a missing entry get the hint "is the OS keyring
 locked or unavailable (e.g. over SSH)?" appended to the OS message, which
 covers the macOS-over-SSH case without inspecting platform error codes.
 
