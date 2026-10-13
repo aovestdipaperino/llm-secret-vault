@@ -9,6 +9,7 @@ pub mod error;
 pub mod generate;
 pub mod import;
 pub mod inject;
+pub mod mcp;
 pub mod name;
 pub mod redact;
 pub mod vault;
