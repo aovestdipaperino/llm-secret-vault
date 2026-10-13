@@ -37,7 +37,7 @@ zeroize = "1"
 block2 = "0.6"
 objc2 = "0.6"
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString", "NSError"] }
-objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext", "LAError"] }
+objc2-local-authentication = { version = "0.3", default-features = false, features = ["std", "block2", "LAContext"] }
 
 [dev-dependencies]
 proptest = "1"

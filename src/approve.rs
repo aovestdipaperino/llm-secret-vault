@@ -164,6 +164,10 @@ fn platform_approver(_ttl: Duration) -> Box<dyn Approver> {
     Box::new(AllowAll)
 }
 
+/// How long a Touch ID prompt may stay unanswered before it counts as a refusal.
+#[cfg(target_os = "macos")]
+const PROMPT_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Asks for Touch ID, or the login password, through `LocalAuthentication`.
 #[cfg(target_os = "macos")]
 #[derive(Debug, Default, Clone, Copy)]
@@ -184,7 +188,9 @@ impl Approver for TouchId {
 
 /// Runs `LAPolicy::DeviceOwnerAuthentication` and waits for the reply.
 ///
-/// Returns `false` if the user fails, cancels, or the reply never arrives.
+/// Returns `false` if the user fails or cancels, if the reply block is
+/// released without being called, or if nobody answers within
+/// [`PROMPT_TIMEOUT`] (the dialog is then dismissed).
 #[cfg(target_os = "macos")]
 fn evaluate_device_owner(reason: &str) -> bool {
     use std::sync::mpsc;
@@ -215,7 +221,19 @@ fn evaluate_device_owner(reason: &str) -> bool {
             &reply,
         );
     }
-    let approved = rx.recv().unwrap_or(false);
+    let approved = match rx.recv_timeout(PROMPT_TIMEOUT) {
+        Ok(approved) => approved,
+        Err(mpsc::RecvTimeoutError::Disconnected) => false,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            // SAFETY: `context` is a valid, live context; invalidating it
+            // dismisses the dialog and makes the pending reply fire with a
+            // cancel error.
+            unsafe { context.invalidate() };
+            // Wait briefly for that reply so the block is not left pending.
+            let _ = rx.recv_timeout(Duration::from_secs(1));
+            false
+        }
+    };
     drop(context);
     approved
 }

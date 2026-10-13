@@ -118,13 +118,14 @@ default) asks for MCP `secret_run` calls, and `all` also asks for `lsv run`
 from the command line. Nothing is asked for commands that use no secrets, and
 an unknown secret name fails before any prompt appears.
 
-The prompt reads `"lsv" is trying to run "<command>" with secrets <names>`,
-where the command is the argv joined with spaces, cut to 80 characters, and
-the names are listed in alphabetical order. Placeholders appear as
-`{{name}}`, never expanded, so no secret value is ever shown. Touch ID falls
-back to your login password when no finger is enrolled or the sensor is not
-available. Cancelling or failing the prompt refuses the run with
-`Touch ID approval was denied or cancelled`, and the command is not started.
+The prompt's reason reads `run "<command>" with secrets <names>`, where the
+command is the argv joined with spaces, cut to 80 characters plus `…` when
+longer, and the names are listed in alphabetical order. Placeholders appear
+as `{{name}}`, never expanded, so no secret value is ever shown. You can use
+your login password instead of a finger at any time. Cancelling or failing
+the prompt refuses the run with `Touch ID approval was denied or cancelled`,
+and the command is not started. A prompt left unanswered for two minutes is
+dismissed and counts as a refusal.
 
 After a successful approval the server does not ask again for
 `LSV_TOUCH_ID_TTL` seconds (default 300, maximum 3600; `0` asks every time).
@@ -135,7 +136,7 @@ The MCP server reads these variables from its own environment, so set them
 where the server is registered. For Claude Code:
 
 ```bash
-claude mcp add --scope user -e LSV_TOUCH_ID=all llm-secret-vault -- lsv mcp
+claude mcp add --scope user llm-secret-vault -e LSV_TOUCH_ID=all -- lsv mcp
 ```
 
 For plank, add an `env` key to the entry in `.mcp.json`:
