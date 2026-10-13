@@ -143,7 +143,10 @@ impl Index {
             std::process::id(),
             TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        fs::write(&tmp, bytes).map_err(io)?;
+        if let Err(e) = fs::write(&tmp, bytes) {
+            let _ = fs::remove_file(&tmp);
+            return Err(io(e));
+        }
         fs::rename(&tmp, path).map_err(|e| {
             let _ = fs::remove_file(&tmp);
             io(e)
@@ -213,13 +216,24 @@ mod tests {
         assert_eq!(fresh.list(None), vec![meta("a"), meta("b")]);
     }
 
+    #[cfg(unix)]
     #[test]
     fn failed_persist_leaves_memory_unchanged() {
+        use std::os::unix::fs::PermissionsExt;
+
         let dir = tempfile::tempdir().unwrap();
-        let index = Index::load(dir.path().join("sub").join("index.json")).unwrap();
-        // The parent "directory" becomes a regular file, so persisting must fail.
-        fs::write(dir.path().join("sub"), "x").unwrap();
-        assert!(index.upsert(meta("a")).is_err());
-        assert!(index.list(None).is_empty());
+        let path = dir.path().join("index.json");
+        let index = Index::load(&path).unwrap();
+        index.upsert(meta("a")).unwrap();
+        // Read and traverse only: the temp file cannot be created.
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o555)).unwrap();
+        let result = index.upsert(meta("b"));
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+        if result.is_ok() {
+            // Running with privileges that ignore permissions (e.g. root).
+            return;
+        }
+        assert_eq!(index.list(None), vec![meta("a")]);
+        assert_eq!(Index::load(&path).unwrap().list(None), vec![meta("a")]);
     }
 }

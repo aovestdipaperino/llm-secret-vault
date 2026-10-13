@@ -132,16 +132,16 @@ impl Vault {
 
     /// Stores `value` under `name` and returns its metadata.
     ///
+    /// The fingerprint is computed before anything is stored. If the index
+    /// update fails after the keyring write succeeded, the error is returned
+    /// and the keyring keeps the new value (an overwritten old value is not
+    /// restored).
+    ///
     /// # Errors
     ///
     /// Returns [`ErrorKind::InvalidValue`] if the value length is out of range,
     /// [`ErrorKind::NameExists`] if the name exists and `overwrite` is false,
     /// [`ErrorKind::Keyring`] or [`ErrorKind::Index`] if storage fails.
-    ///
-    /// The fingerprint is computed before anything is stored. If the index
-    /// update fails after the keyring write succeeded, the error is returned
-    /// and the keyring keeps the new value (an overwritten old value is not
-    /// restored).
     ///
     /// # Panics
     ///
@@ -170,13 +170,13 @@ impl Vault {
         if existing.is_some() && !overwrite {
             return Err(Error::new(ErrorKind::NameExists(name.to_string())));
         }
-        let fingerprint = fingerprint(self.inner.backend.as_ref(), value)?;
+        let fp = fingerprint(self.inner.backend.as_ref(), value)?;
         self.inner.backend.put(name.as_str(), value)?;
         let now = now_secs();
         let meta = Meta {
             name: name.clone(),
             len: value.chars().count(),
-            fingerprint,
+            fingerprint: fp,
             source,
             created: existing.as_ref().map_or(now, |m| m.created),
             rotated: existing.map(|_| now),
@@ -187,12 +187,13 @@ impl Vault {
 
     /// Deletes a secret from the keyring and the index.
     ///
+    /// The keyring entry is deleted first, so a keyring failure leaves the
+    /// index entry in place.
+    ///
     /// # Errors
     ///
     /// Returns [`ErrorKind::UnknownName`] if the secret exists in neither,
     /// or [`ErrorKind::Keyring`] / [`ErrorKind::Index`] if deletion fails.
-    /// The keyring entry is deleted first, so a keyring failure leaves the
-    /// index entry in place.
     ///
     /// # Panics
     ///
@@ -346,5 +347,31 @@ mod tests {
         );
         assert!(vault.delete(&name("nope")).is_err());
         assert!(!path.exists());
+    }
+
+    #[derive(Debug)]
+    struct FailingDelete;
+
+    impl Backend for FailingDelete {
+        fn put(&self, _: &str, _: &str) -> Result<()> {
+            Ok(())
+        }
+        fn resolve(&self, _: &str) -> Result<Option<Zeroizing<String>>> {
+            Ok(None)
+        }
+        fn delete(&self, _: &str) -> Result<bool> {
+            Err(Error::new(ErrorKind::Keyring("simulated".to_owned())))
+        }
+    }
+
+    #[test]
+    fn backend_delete_failure_keeps_index_entry() {
+        let vault = Vault::with_parts(Box::new(FailingDelete), Index::in_memory());
+        vault
+            .store(&name("k"), "value-123", Source::Generated, false)
+            .unwrap();
+        let err = vault.delete(&name("k")).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::Keyring(_)));
+        assert!(vault.exists(&name("k")));
     }
 }
