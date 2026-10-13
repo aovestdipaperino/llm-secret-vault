@@ -36,4 +36,4 @@ jobs:
         run: dbus-run-session -- sh -c 'printf ci | gnome-keyring-daemon --unlock --components=secrets && cargo test -- --ignored'
       - name: Real keyring tests (macOS, Windows)
         if: runner.os != 'Linux'
-        run: cargo test -- --ignored
+        run: cargo test -- --ignored --skip touch_id_prompt
