@@ -26,7 +26,7 @@ static DIRECT_READS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     vec![
         (
             regex(
-                r"\bsecurity\s+find-(generic|internet)-password\b[^|;&]*\s-[A-Za-z]*[wg][A-Za-z]*\b",
+                r"\bsecurity\s+(?:-\S+\s+)*find-(generic|internet)-password\b[^|;&]*\s-[A-Za-z]*[wg][A-Za-z]*\b",
             ),
             "reads a Keychain password directly; use `lsv run` instead",
         ),
@@ -39,7 +39,7 @@ static DIRECT_READS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
             "reads a Windows credential directly; use `lsv run` instead",
         ),
         (
-            regex(r"(?i)\bcmdkey\b[^|;&]*/pass"),
+            regex(r"(?i)\bcmdkey\b[^|;&]*/list[^|;&]*/pass"),
             "reads a Windows credential directly; use `lsv run` instead",
         ),
         (
@@ -49,12 +49,14 @@ static DIRECT_READS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
     ]
 });
 
-static LSV_RUN: LazyLock<Regex> = LazyLock::new(|| regex(r"\blsv\s+run\b"));
+static LSV_RUN: LazyLock<Regex> =
+    LazyLock::new(|| regex(r"(?:^|[\s;&|(])(?:[^\s;&|()]*/)?lsv\s+run\b"));
 static DOUBLE_DASH: LazyLock<Regex> = LazyLock::new(|| regex(r"\s--(\s|$)"));
 static BINDING: LazyLock<Regex> =
     LazyLock::new(|| regex(r"\b([A-Za-z_][A-Za-z0-9_]*)=[a-z0-9][a-z0-9._-]*"));
 static SEPARATORS: LazyLock<Regex> = LazyLock::new(|| regex(r"&&|\|\||;|\n"));
-static SHELL_PREFIX: LazyLock<Regex> = LazyLock::new(|| regex(r"^(?:sh|bash|zsh)\s+-c\s+"));
+static SHELL_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| regex(r"^(?:\S*/)?(?:sh|bash|zsh)\s+-[A-Za-z]*c\s+"));
 
 const ENCODERS: &[&str] = &["rev", "base64", "xxd", "od", "hexdump"];
 
@@ -62,25 +64,63 @@ fn first_word(segment: &str) -> &str {
     segment.split_whitespace().next().unwrap_or("")
 }
 
+fn basename(word: &str) -> &str {
+    word.rsplit('/').next().unwrap_or(word)
+}
+
 fn dumps_env(segment: &str) -> bool {
     let mut words = segment.split_whitespace();
-    match words.next() {
+    match words.next().map(basename) {
         Some("printenv") => true,
-        Some("env" | "set") => words.next().is_none(),
-        Some("export") => words.next() == Some("-p"),
+        Some("env") => words.all(|w| w.starts_with('-')),
+        Some("set") => words.next().is_none(),
+        Some("export") => matches!(words.next(), None | Some("-p")),
         _ => false,
     }
 }
 
+/// Whether `text` contains `$name` (not followed by an identifier character) or `${name}`.
+fn mentions_var(text: &str, name: &str) -> bool {
+    if text.contains(&format!("${{{name}}}")) {
+        return true;
+    }
+    let needle = format!("${name}");
+    text.match_indices(&needle).any(|(i, _)| {
+        !text[i + needle.len()..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    })
+}
+
+/// Returns the byte offset of the first unquoted `&&`, `||`, `;` or newline.
+fn top_level_end(text: &str) -> usize {
+    let bytes = text.as_bytes();
+    let mut quote = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        let b = bytes[i];
+        match quote {
+            Some(q) if b == q => quote = None,
+            Some(_) => {}
+            None => match b {
+                b'\'' | b'"' => quote = Some(b),
+                b';' | b'\n' => return i,
+                b'&' | b'|' if bytes.get(i + 1) == Some(&b) => return i,
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+    text.len()
+}
+
 /// Checks the child part of an `lsv run` command line.
 fn check_child(child: &str, vars: &[&str]) -> Option<String> {
+    // Quote stripping is heuristic: it lets `sh -c '...'` bodies be inspected
+    // as plain command lines, at the cost of ignoring real quoting rules.
     let unquoted: String = child.chars().filter(|c| !matches!(c, '\'' | '"')).collect();
-    let references = |s: &str| {
-        s.contains("{{")
-            || vars
-                .iter()
-                .any(|v| s.contains(&format!("${v}")) || s.contains(&format!("${{{v}}}")))
-    };
+    let references = |s: &str| s.contains("{{") || vars.iter().any(|v| mentions_var(s, v));
     for command in SEPARATORS.split(&unquoted) {
         let command = SHELL_PREFIX.replace(command.trim(), "");
         let segments: Vec<&str> = command.split('|').map(str::trim).collect();
@@ -104,7 +144,7 @@ fn check_child(child: &str, vars: &[&str]) -> Option<String> {
         }
         if let Some(last) = segments.last() {
             let word = first_word(last);
-            if matches!(word, "echo" | "printf") && references(last) {
+            if matches!(word, "echo" | "printf") && references(last) && !last.contains('>') {
                 return Some(format!("`{word}` would print an injected secret"));
             }
         }
@@ -120,21 +160,21 @@ pub fn check_command(command: &str) -> Decision {
             return Decision::Deny((*reason).to_owned());
         }
     }
-    let Some(run) = LSV_RUN.find(command) else {
-        return Decision::Allow;
-    };
-    let rest = &command[run.end()..];
-    let Some(dash) = DOUBLE_DASH.find(rest) else {
-        return Decision::Allow;
-    };
-    let vars: Vec<&str> = BINDING
-        .captures_iter(&rest[..dash.start()])
-        .filter_map(|c| c.get(1).map(|m| m.as_str()))
-        .collect();
-    match check_child(&rest[dash.end()..], &vars) {
-        Some(reason) => Decision::Deny(reason),
-        None => Decision::Allow,
+    for run in LSV_RUN.find_iter(command) {
+        let rest = &command[run.end()..];
+        let rest = &rest[..top_level_end(rest)];
+        let Some(dash) = DOUBLE_DASH.find(rest) else {
+            continue;
+        };
+        let vars: Vec<&str> = BINDING
+            .captures_iter(&rest[..dash.start()])
+            .filter_map(|c| c.get(1).map(|m| m.as_str()))
+            .collect();
+        if let Some(reason) = check_child(&rest[dash.end()..], &vars) {
+            return Decision::Deny(reason);
+        }
     }
+    Decision::Allow
 }
 
 /// Evaluates a Claude Code `PreToolUse` hook payload.

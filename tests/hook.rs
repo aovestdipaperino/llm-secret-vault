@@ -20,6 +20,16 @@ const DENY: &[&str] = &[
     "lsv run PW=nas-root -- sh -c 'set'",
     "lsv run PW=nas-root -- sh -c 'export -p'",
     "cd /tmp && lsv run PW=nas-root -- sh -c 'ls; echo $PW'",
+    "lsv run A=a -- ls && lsv run PW=b -- printenv",
+    "./target/release/lsv run PW=b -- printenv",
+    "/usr/local/bin/lsv run PW=b -- sh -c 'echo $PW'",
+    "lsv run PW=b -- /bin/sh -c 'echo $PW'",
+    "lsv run PW=b -- bash -lc 'echo $PW'",
+    "lsv run PW=b -- /usr/bin/env -0",
+    "lsv run PW=b -- env -i",
+    "lsv run PW=b -- /usr/bin/printenv",
+    "lsv run PW=b -- sh -c 'export'",
+    "security -q find-generic-password -s foo -w",
 ];
 
 const ALLOW: &[&str] = &[
@@ -34,6 +44,10 @@ const ALLOW: &[&str] = &[
     "lsv run -- curl -H 'Bearer {{resend}}' https://api.resend.com",
     "lsv run PW=nas-root -- env FOO=1 ./deploy.sh",
     "lsv list",
+    "lsv run T=x -- sh -c 'echo $T > f'",
+    "lsv run T=x -- sh -c 'printf %s \"$T\" >> f'",
+    "lsv run T=tok -- sh -c 'echo $TERM'",
+    "cmdkey /add:nas /user:u /pass:x",
     "echo $HOME",
 ];
 
