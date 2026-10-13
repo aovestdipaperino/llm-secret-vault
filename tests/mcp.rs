@@ -255,10 +255,14 @@ fn generate_reports_metadata_only() {
 fn run_redacts_output() {
     let server = server();
     tool(&server, "secret_capture", &json!({"name": "resend"}));
+    // The guard cannot see inside a script, so this exercises redaction itself.
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("print.sh");
+    std::fs::write(&script, "echo token=$T\n").unwrap();
     let (text, is_error) = tool(
         &server,
         "secret_run",
-        &json!({"argv": ["sh", "-c", "echo token=$T > /dev/stdout"], "env": {"T": "resend"}}),
+        &json!({"argv": ["sh", script.to_str().unwrap()], "env": {"T": "resend"}}),
     );
     assert!(!is_error, "{text}");
     let out: Value = serde_json::from_str(&text).unwrap();

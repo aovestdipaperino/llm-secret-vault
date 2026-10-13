@@ -32,6 +32,13 @@ const DENY: &[&str] = &[
     "lsv run PW=b -- /usr/bin/printenv",
     "lsv run PW=b -- sh -c 'export'",
     "security -q find-generic-password -s foo -w",
+    "lsv run T=x -- sh -c 'echo $T > /dev/stdout'",
+    "lsv run T=x -- sh -c 'echo $T >&2'",
+    "lsv run T=x -- sh -c 'printf %s $T >/dev/tty'",
+    "lsv run T=x -- sh -c 'echo $T >> /dev/stderr'",
+    "lsv run T=x -- sh -c 'echo $T 1>&2'",
+    "lsv run T=x -- sh -c 'echo $T > /dev/fd/1'",
+    "lsv run T=x -- sh -c 'echo $T 2>&1'",
 ];
 
 const ALLOW: &[&str] = &[
@@ -48,6 +55,7 @@ const ALLOW: &[&str] = &[
     "lsv list",
     "lsv run T=x -- sh -c 'echo $T > f'",
     "lsv run T=x -- sh -c 'printf %s \"$T\" >> f'",
+    "lsv run T=x -- sh -c 'echo $T >f 2>&1'",
     "lsv run T=tok -- sh -c 'echo $TERM'",
     "cmdkey /add:nas /user:u /pass:x",
     "echo $HOME",
@@ -100,6 +108,9 @@ fn check_run_denies_leaky_argv() {
         (&["echo", "{{tok}}"], &[]),
         (&["security", "find-generic-password", "-s", "x", "-w"], &[]),
         (&["sh", "-c", "echo ${T} | xxd"], &["T"]),
+        (&["sh", "-c", "echo $T >/dev/stderr"], &["T"]),
+        (&["sh", "-c", "echo $T 1>&2"], &["T"]),
+        (&["sh", "-c", "printf %s $T > /dev/stdout"], &["T"]),
     ];
     for (parts, vars) in cases {
         assert!(

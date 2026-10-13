@@ -115,6 +115,30 @@ fn top_level_end(text: &str) -> usize {
     text.len()
 }
 
+/// Output redirect: optional fd, `>` or `>>`, then the target (`&2` or a word).
+static REDIRECT: LazyLock<Regex> = LazyLock::new(|| regex(r"(\d*)>>?\s*(&\s*\d|[^\s;&|<>]+)"));
+
+/// Whether a command's stdout still reaches the agent: true unless stdout is
+/// redirected to a real file. Redirects to stdout, stderr or the terminal
+/// (`>&2`, `> /dev/stdout`, `2>&1`, ...) keep the output visible, and a
+/// redirect of another fd (`2>f`) leaves stdout alone.
+fn reaches_agent(segment: &str) -> bool {
+    const VISIBLE: [&str; 7] = [
+        "&1",
+        "&2",
+        "/dev/stdout",
+        "/dev/stderr",
+        "/dev/tty",
+        "/dev/fd/1",
+        "/dev/fd/2",
+    ];
+    !REDIRECT.captures_iter(segment).any(|c| {
+        let fd = &c[1];
+        let target: String = c[2].split_whitespace().collect();
+        (fd.is_empty() || fd == "1") && !VISIBLE.contains(&target.as_str())
+    })
+}
+
 /// Checks the child part of an `lsv run` command line.
 fn check_child(child: &str, vars: &[&str]) -> Option<String> {
     // Quote stripping is heuristic: it lets `sh -c '...'` bodies be inspected
@@ -144,7 +168,7 @@ fn check_child(child: &str, vars: &[&str]) -> Option<String> {
         }
         if let Some(last) = segments.last() {
             let word = first_word(last);
-            if matches!(word, "echo" | "printf") && references(last) && !last.contains('>') {
+            if matches!(word, "echo" | "printf") && references(last) && reaches_agent(last) {
                 return Some(format!("`{word}` would print an injected secret"));
             }
         }
