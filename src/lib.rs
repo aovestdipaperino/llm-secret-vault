@@ -7,5 +7,9 @@
 pub mod error;
 pub mod name;
 
+// used from Task 3 (vault)
+#[allow(dead_code)]
+mod backend;
+
 pub use error::{Error, ErrorKind, Result};
 pub use name::SecretName;
