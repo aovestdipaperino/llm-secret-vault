@@ -1,0 +1,61 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="title">
+  <title id="title">llm-secret-vault logo: a round vault door with a terminal prompt at its centre</title>
+  <defs>
+    <linearGradient id="steel" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5b6b7c"/>
+      <stop offset="0.5" stop-color="#3a4756"/>
+      <stop offset="1" stop-color="#232c36"/>
+    </linearGradient>
+    <linearGradient id="door" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8796a5"/>
+      <stop offset="1" stop-color="#4a5868"/>
+    </linearGradient>
+    <linearGradient id="brass" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f2c56b"/>
+      <stop offset="1" stop-color="#b9862f"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Frame -->
+  <rect x="16" y="16" width="480" height="480" rx="72" fill="url(#steel)"/>
+  <rect x="36" y="36" width="440" height="440" rx="56" fill="none" stroke="#1a2129" stroke-width="4" opacity="0.6"/>
+
+  <!-- Hinges -->
+  <rect x="24" y="150" width="34" height="56" rx="8" fill="#2a333d"/>
+  <rect x="24" y="306" width="34" height="56" rx="8" fill="#2a333d"/>
+
+  <!-- Door -->
+  <circle cx="256" cy="256" r="188" fill="#1f2730"/>
+  <circle cx="256" cy="256" r="176" fill="url(#door)"/>
+  <circle cx="256" cy="256" r="176" fill="none" stroke="#2b3540" stroke-width="6"/>
+
+  <!-- Locking bolts around the rim -->
+  <g fill="#2b3540">
+    <circle cx="256" cy="98" r="10"/>
+    <circle cx="256" cy="414" r="10"/>
+    <circle cx="98" cy="256" r="10"/>
+    <circle cx="414" cy="256" r="10"/>
+    <circle cx="144.3" cy="144.3" r="10"/>
+    <circle cx="367.7" cy="144.3" r="10"/>
+    <circle cx="144.3" cy="367.7" r="10"/>
+    <circle cx="367.7" cy="367.7" r="10"/>
+  </g>
+
+  <!-- Wheel handle: three spokes -->
+  <g stroke="#d4a04a" stroke-width="18" stroke-linecap="round">
+    <line x1="256" y1="256" x2="256" y2="150"/>
+    <line x1="256" y1="256" x2="164.2" y2="309"/>
+    <line x1="256" y1="256" x2="347.8" y2="309"/>
+  </g>
+  <g fill="url(#brass)">
+    <circle cx="256" cy="150" r="16"/>
+    <circle cx="164.2" cy="309" r="16"/>
+    <circle cx="347.8" cy="309" r="16"/>
+  </g>
+
+  <!-- Hub with a terminal prompt -->
+  <circle cx="256" cy="256" r="62" fill="url(#brass)"/>
+  <circle cx="256" cy="256" r="50" fill="#161c22"/>
+  <path d="M226 238 l20 18 l-20 18" fill="none" stroke="#7ee2a8" stroke-width="9" stroke-linecap="round" stroke-linejoin="round"/>
+  <line x1="254" y1="276" x2="286" y2="276" stroke="#7ee2a8" stroke-width="9" stroke-linecap="round"/>
+</svg>

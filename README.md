@@ -1,5 +1,9 @@
 # llm-secret-vault
 
+<p align="center">
+  <img src="assets/logo.png" alt="llm-secret-vault logo: a vault door with a terminal prompt at its centre" width="240">
+</p>
+
 **Let LLM agents capture, generate and use your secrets without ever reading them.**
 
 [![CI](https://github.com/aovestdipaperino/llm-secret-vault/actions/workflows/ci.yml/badge.svg)](https://github.com/aovestdipaperino/llm-secret-vault/actions/workflows/ci.yml)
