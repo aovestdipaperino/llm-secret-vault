@@ -234,7 +234,9 @@ processes writing at the same instant can still race in a small window. On
 Windows there is no process-group kill, so a timeout kills the child but not
 its grandchildren.
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full design.
+See [docs/DESIGN.md](docs/DESIGN.md) for the full design, and
+[formal/README.md](formal/README.md) for the Kani proofs, bounded exhaustive
+checks and TLA+ model of approval that back it.
 
 ## License
 

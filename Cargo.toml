@@ -47,6 +47,7 @@ tempfile = "3"
 missing_debug_implementations = "warn"
 unsafe_op_in_unsafe_fn = "warn"
 unused_lifetimes = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(kani)"] }
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }

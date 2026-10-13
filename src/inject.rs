@@ -453,6 +453,55 @@ mod tests {
         assert_eq!(found, ["nas-root", "hf.token"]);
     }
 
+    /// Every argument up to `max` characters over the characters that matter
+    /// to placeholder parsing, plus one multi-byte character.
+    fn arguments(max: usize) -> Vec<String> {
+        let mut all = vec![String::new()];
+        let mut layer = vec![String::new()];
+        for _ in 0..max {
+            layer = layer
+                .iter()
+                .flat_map(|s| ['{', '}', 'a', ' ', 'é'].map(|c| format!("{s}{c}")))
+                .collect();
+            all.extend(layer.iter().cloned());
+        }
+        all
+    }
+
+    /// Bounded exhaustive check (see `formal/README.md`): placeholder ranges
+    /// are in bounds, on character boundaries, ordered, disjoint and shaped
+    /// `{{ name }}`, and `substitute` fills exactly the buffer it reserves, so
+    /// it never reallocates and leaves no unzeroed copy of a value behind.
+    #[test]
+    fn placeholders_and_substitute_exhaustive() {
+        for arg in arguments(7) {
+            let found = placeholders(&arg);
+            let mut last_end = 0;
+            for (range, name) in &found {
+                assert!(
+                    last_end <= range.start && range.start < range.end,
+                    "{arg:?}"
+                );
+                assert!(arg.is_char_boundary(range.start) && arg.is_char_boundary(range.end));
+                let text = &arg[range.clone()];
+                assert!(text.starts_with("{{") && text.ends_with("}}"), "{arg:?}");
+                assert_eq!(text[2..text.len() - 2].trim(), name.as_str());
+                last_end = range.end;
+            }
+            for len in 0..=3 {
+                let values: BTreeMap<SecretName, Zeroizing<String>> = found
+                    .iter()
+                    .map(|(_, n)| (n.clone(), Zeroizing::new("v".repeat(len))))
+                    .collect();
+                let reserved =
+                    arg.len() + found.iter().map(|(_, n)| values[n].len()).sum::<usize>();
+                let out = substitute(&arg, &values);
+                assert!(out.len() <= reserved);
+                assert_eq!(out.capacity(), reserved, "{arg:?}");
+            }
+        }
+    }
+
     #[test]
     fn env_var_names() {
         assert!(is_env_var_name("HF_TOKEN"));
@@ -460,5 +509,36 @@ mod tests {
         assert!(!is_env_var_name("1BAD"));
         assert!(!is_env_var_name("A-B"));
         assert!(!is_env_var_name(""));
+    }
+}
+
+/// Kani proof harnesses. Run with `cargo kani`; see `formal/README.md`.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// With the invariant `pump` keeps (output never above the cap), appending
+    /// keeps it, never panics, and reports truncation exactly when it cuts.
+    #[kani::proof]
+    #[kani::unwind(6)]
+    fn append_capped_respects_cap() {
+        let cap: Option<usize> = kani::any();
+        let have: usize = kani::any();
+        let add: usize = kani::any();
+        kani::assume(have <= 3 && add <= 3);
+        kani::assume(cap.is_none_or(|c| have <= c));
+        let mut out = vec![0u8; have];
+        let truncated = append_capped(&mut out, &[1u8; 3][..add], cap);
+        if let Some(c) = cap {
+            assert!(out.len() <= c);
+        }
+        assert_eq!(truncated, out.len() < have + add);
+    }
+
+    /// The raw-input bound never overflows and never undercuts the output cap.
+    #[kani::proof]
+    fn raw_limit_is_at_least_cap() {
+        let cap: usize = kani::any();
+        assert!(raw_limit(cap) >= cap);
     }
 }

@@ -119,6 +119,11 @@ impl Redactor {
                 });
             }
         }
+        Self::from_patterns(patterns)
+    }
+
+    /// Builds a redactor from ready-made patterns, longest first.
+    fn from_patterns(mut patterns: Vec<Pattern>) -> Self {
         patterns.sort_by_key(|p| std::cmp::Reverse(p.bytes.len()));
         let max_len = patterns.first().map_or(0, |p| p.bytes.len());
         Self {
@@ -384,6 +389,85 @@ mod tests {
     fn passes_through_without_secrets_and_on_empty_input() {
         assert_eq!(redact(&[], "nothing to hide"), "nothing to hide");
         assert_eq!(redact(&[("k", "value-123")], ""), "");
+    }
+
+    /// Every string over `{0, 1, 2}` with length in `min..=max`.
+    fn strings(min: usize, max: usize) -> Vec<Vec<u8>> {
+        let mut all = vec![Vec::new()];
+        let mut layer = vec![Vec::new()];
+        for _ in 0..max {
+            layer = layer
+                .iter()
+                .flat_map(|s: &Vec<u8>| (0..3).map(move |b| [s.as_slice(), &[b]].concat()))
+                .collect();
+            all.extend(layer.iter().cloned());
+        }
+        all.retain(|s| s.len() >= min);
+        all
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Bounded exhaustive check of the scanner: for every pair of secrets up to
+    /// `max_pattern` bytes and every input up to `max_input` bytes over the
+    /// alphabet `{0, 1, 2}`, no secret survives, clean input is unchanged, and
+    /// every split into three chunks gives the one-shot output. Each label's
+    /// marker is one byte outside the alphabet, so a secret found in the output
+    /// can only be input that escaped. See `formal/README.md`.
+    fn exhaustive(max_pattern: usize, max_input: usize) {
+        let patterns = strings(1, max_pattern);
+        let inputs = strings(0, max_input);
+        let redactor = |a: &[u8], b: &[u8]| {
+            Redactor::from_patterns(vec![
+                Pattern {
+                    bytes: Zeroizing::new(a.to_vec()),
+                    marker: vec![0xF0],
+                },
+                Pattern {
+                    bytes: Zeroizing::new(b.to_vec()),
+                    marker: vec![0xF1],
+                },
+            ])
+        };
+        for a in &patterns {
+            for b in &patterns {
+                for input in &inputs {
+                    let mut r = redactor(a, b);
+                    let mut whole = r.push(input);
+                    whole.extend(r.finish());
+                    assert!(
+                        !contains(&whole, a) && !contains(&whole, b),
+                        "{a:?} {b:?} {input:?}"
+                    );
+                    if !contains(input, a) && !contains(input, b) {
+                        assert_eq!(&whole, input);
+                    }
+                    for i in 0..=input.len() {
+                        for j in i..=input.len() {
+                            let mut r = redactor(a, b);
+                            let mut out = r.push(&input[..i]);
+                            out.extend(r.push(&input[i..j]));
+                            out.extend(r.push(&input[j..]));
+                            out.extend(r.finish());
+                            assert_eq!(out, whole, "{a:?} {b:?} {input:?} split {i} {j}");
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn exhaustive_small() {
+        exhaustive(3, 4);
+    }
+
+    #[test]
+    #[ignore = "about 10 s in release; run with --release -- --ignored"]
+    fn exhaustive_large() {
+        exhaustive(3, 6);
     }
 
     #[test]

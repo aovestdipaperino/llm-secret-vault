@@ -281,3 +281,22 @@ pub fn evaluate(input: &str) -> Result<Decision> {
         .ok_or_else(|| usage("shell hook input has no tool_input.command".to_owned()))?;
     Ok(check_command(command))
 }
+
+/// Kani proof harnesses. Run with `cargo kani`; see `formal/README.md`.
+#[cfg(kani)]
+mod proofs {
+    use super::*;
+
+    /// `check_command` slices at `top_level_end`, so it must return an
+    /// in-bounds character boundary for any UTF-8 input.
+    #[kani::proof]
+    #[kani::unwind(7)]
+    fn top_level_end_is_a_char_boundary() {
+        let bytes: [u8; 5] = kani::any();
+        let Ok(text) = std::str::from_utf8(&bytes) else {
+            return;
+        };
+        let end = top_level_end(text);
+        assert!(end <= text.len() && text.is_char_boundary(end));
+    }
+}
