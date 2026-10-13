@@ -1,4 +1,13 @@
 //! Streaming redaction of secret values and their common encodings.
+//!
+//! Covered forms: the raw value, standard and URL-safe base64 (padded and
+//! unpadded), percent-encoding, and lower/upper-case hex. When a secret is
+//! followed by other bytes inside one base64 blob, the prefix made of complete
+//! 3-byte groups is also covered. Base64 of a secret at a non-zero offset
+//! inside a larger blob is not covered.
+//!
+//! Matches that overlap or touch are merged into one span, replaced by one
+//! marker per distinct label in the order the secrets were found.
 
 use std::fmt::{self, Write as _};
 
@@ -18,6 +27,7 @@ fn percent_encode(value: &str) -> String {
         if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
             out.push(char::from(byte));
         } else {
+            // Writing to a String cannot fail.
             let _ = write!(out, "%{byte:02X}");
         }
     }
@@ -37,6 +47,15 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
         hex::encode(raw).into_bytes(),
         hex::encode_upper(raw).into_bytes(),
     ];
+    // Base64 of `secret + more`: only whole 3-byte groups are independent of
+    // what follows, so cover that prefix (when it is long enough to be useful).
+    if raw.len() % 3 != 0 {
+        let prefix_len = raw.len() / 3 * 4;
+        if prefix_len >= 4 {
+            all.push(STANDARD.encode(raw).into_bytes()[..prefix_len].to_vec());
+            all.push(URL_SAFE.encode(raw).into_bytes()[..prefix_len].to_vec());
+        }
+    }
     all.retain(|v| !v.is_empty());
     all.sort();
     all.dedup();
@@ -46,7 +65,10 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
 /// Redacts secrets from a byte stream, even when a value spans two chunks.
 ///
 /// It holds back the last `longest pattern - 1` bytes of each chunk until
-/// more input or [`Redactor::finish`] shows whether they start a match.
+/// more input or [`Redactor::finish`] shows whether they start a match. The
+/// holdback is at most one byte less than the longest encoded form (up to
+/// `3 * 16384 - 1` bytes for percent-encoding) and can grow while a chain of
+/// overlapping matches is still open. Scanning costs O(bytes x patterns).
 ///
 /// # Examples
 ///
@@ -99,6 +121,7 @@ impl Redactor {
     }
 
     /// Feeds a chunk and returns the bytes that are now safe to emit.
+    #[must_use]
     pub fn push(&mut self, chunk: &[u8]) -> Vec<u8> {
         self.pending.extend_from_slice(chunk);
         if self.max_len == 0 {
@@ -117,24 +140,52 @@ impl Redactor {
     /// Flushes everything still held back.
     #[must_use]
     pub fn finish(self) -> Vec<u8> {
-        let limit = self.pending.len();
+        // Every position up to the end is decidable once no more input follows.
+        let limit = self.pending.len() + 1;
         self.scan(limit).0
     }
 
+    /// Longest pattern matching at `pos`, if any.
+    fn match_at(&self, pos: usize) -> Option<&Pattern> {
+        let rest = &self.pending[pos..];
+        self.patterns.iter().find(|p| rest.starts_with(&p.bytes))
+    }
+
     /// Emits output for pending positions `< limit`; returns it and the bytes consumed.
+    ///
+    /// A span of overlapping or touching matches is only emitted once every
+    /// position up to and including its end is `< limit`; otherwise the scan
+    /// stops at the span start and leaves it pending.
     fn scan(&self, limit: usize) -> (Vec<u8>, usize) {
         let pending = &self.pending;
-        let mut out = Vec::with_capacity(limit);
+        let stop = limit.min(pending.len());
+        let mut out = Vec::with_capacity(stop);
         let mut i = 0;
-        while i < limit {
-            let rest = &pending[i..];
-            if let Some(pattern) = self.patterns.iter().find(|p| rest.starts_with(&p.bytes)) {
-                out.extend_from_slice(&pattern.marker);
-                i += pattern.bytes.len();
-            } else {
+        while i < stop {
+            let Some(first) = self.match_at(i) else {
                 out.push(pending[i]);
                 i += 1;
+                continue;
+            };
+            let mut end = i + first.bytes.len();
+            let mut markers: Vec<&[u8]> = vec![&first.marker];
+            let mut j = i + 1;
+            while j <= end {
+                if j >= limit {
+                    return (out, i);
+                }
+                if let Some(next) = self.match_at(j) {
+                    end = end.max(j + next.bytes.len());
+                    if !markers.contains(&next.marker.as_slice()) {
+                        markers.push(&next.marker);
+                    }
+                }
+                j += 1;
             }
+            for marker in markers {
+                out.extend_from_slice(marker);
+            }
+            i = end;
         }
         (out, i)
     }
@@ -233,6 +284,81 @@ mod tests {
                 "chunk size {size}"
             );
         }
+    }
+
+    fn chunked(secrets: &[(&str, &str)], input: &[u8], size: usize) -> String {
+        let mut redactor = Redactor::new(secrets.iter().copied());
+        let mut out = Vec::new();
+        for piece in input.chunks(size) {
+            out.extend(redactor.push(piece));
+        }
+        out.extend(redactor.finish());
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn offset_overlap_is_merged_at_every_chunk_size() {
+        let secrets = [("a", "abcd1234"), ("b", "1234efgh")];
+        let input = b"x abcd1234efgh y";
+        for size in 1..=input.len() {
+            assert_eq!(
+                chunked(&secrets, input, size),
+                "x «redacted:a»«redacted:b» y",
+                "chunk size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn three_chained_overlaps_are_merged() {
+        let secrets = [("a", "abcd1234"), ("b", "1234efgh"), ("c", "efghWXYZ")];
+        let input = b"[abcd1234efghWXYZ]";
+        for size in 1..=input.len() {
+            assert_eq!(
+                chunked(&secrets, input, size),
+                "[«redacted:a»«redacted:b»«redacted:c»]",
+                "chunk size {size}"
+            );
+        }
+    }
+
+    #[test]
+    fn touching_matches_are_merged() {
+        let secrets = [("a", "abcd1234"), ("b", "efghWXYZ")];
+        assert_eq!(
+            chunked(&secrets, b"abcd1234efghWXYZ!", 3),
+            "«redacted:a»«redacted:b»!"
+        );
+    }
+
+    #[test]
+    fn base64_prefix_is_covered_when_secret_is_followed_by_bytes() {
+        let secret = "hunter2-secret";
+        for suffix in ["X", ":more"] {
+            let blob = STANDARD.encode(format!("{secret}{suffix}"));
+            let out = redact(&[("k", secret)], &blob);
+            assert!(out.starts_with("«redacted:k»"), "{suffix}: {out}");
+            let head = &blob[..16];
+            for window in head.as_bytes().windows(8) {
+                assert!(!out.contains(std::str::from_utf8(window).unwrap()));
+            }
+        }
+    }
+
+    #[test]
+    fn url_safe_base64_is_redacted() {
+        let value = "a???>>>b";
+        let std_form = STANDARD.encode(value);
+        assert!(std_form.contains('/') || std_form.contains('+'));
+        let url_form = std_form.replace('+', "-").replace('/', "_");
+        assert_ne!(std_form, url_form);
+        assert_eq!(redact(&[("k", value)], &url_form), "«redacted:k»");
+        assert_eq!(redact(&[("k", value)], &std_form), "«redacted:k»");
+    }
+
+    #[test]
+    fn single_byte_input_passes_through() {
+        assert_eq!(redact(&[("k", "abcd")], "x"), "x");
     }
 
     #[test]
