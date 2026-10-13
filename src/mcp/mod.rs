@@ -19,6 +19,9 @@ When the user says a key or password is in the clipboard, call secret_capture. \
 Use secret_run to pass secrets to commands through env vars or {{name}} placeholders. \
 Never ask the user to paste a secret into the chat.";
 
+/// Protocol versions this server can speak, newest first.
+pub const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
 /// Creates a clipboard handle on demand (so headless machines fail per call, not at startup).
 pub type ClipboardFactory = Box<dyn Fn() -> Result<Box<dyn Clipboard>> + Send + Sync>;
 
@@ -34,6 +37,10 @@ impl fmt::Debug for Server {
             .field("vault", &self.vault)
             .finish_non_exhaustive()
     }
+}
+
+fn error_response(id: &Value, code: i64, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
 fn tool_result(text: &str, is_error: bool) -> Value {
@@ -57,11 +64,35 @@ impl Server {
     }
 
     /// Handles one JSON-RPC message; returns `None` for notifications.
+    ///
+    /// Batches (JSON arrays) are not supported and get an invalid-request error.
     #[must_use]
     pub fn handle(&self, message: &Value) -> Option<Value> {
-        let id = message.get("id")?.clone();
-        let params = message.get("params");
-        let result = match message.get("method").and_then(Value::as_str) {
+        let Some(object) = message.as_object() else {
+            return Some(error_response(
+                &Value::Null,
+                -32600,
+                "invalid request: expected a single object",
+            ));
+        };
+        let id = match object.get("id") {
+            None => None,
+            Some(id @ (Value::String(_) | Value::Number(_))) => Some(id),
+            Some(_) => {
+                return Some(error_response(
+                    &Value::Null,
+                    -32600,
+                    "invalid request: id must be a string or number",
+                ));
+            }
+        };
+        if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
+            return id
+                .map(|id| error_response(id, -32600, "invalid request: jsonrpc must be \"2.0\""));
+        }
+        let id = id?;
+        let params = object.get("params");
+        let result = match object.get("method").and_then(Value::as_str) {
             Some("initialize") => Ok(Self::initialize(params)),
             Some("ping") => Ok(json!({})),
             Some("tools/list") => Ok(json!({"tools": tools::definitions()})),
@@ -71,9 +102,7 @@ impl Server {
         };
         Some(match result {
             Ok(result) => json!({"jsonrpc": "2.0", "id": id, "result": result}),
-            Err((code, message)) => {
-                json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
-            }
+            Err((code, message)) => error_response(id, code, &message),
         })
     }
 
@@ -81,6 +110,7 @@ impl Server {
         let version = params
             .and_then(|p| p.get("protocolVersion"))
             .and_then(Value::as_str)
+            .filter(|v| SUPPORTED_VERSIONS.contains(v))
             .unwrap_or(PROTOCOL_VERSION);
         json!({
             "protocolVersion": version,
@@ -110,22 +140,33 @@ impl Server {
 
     /// Serves newline-delimited JSON-RPC from `input` to `output` until EOF.
     ///
+    /// Malformed lines (bad UTF-8 or JSON) get an error response and never end the session.
+    ///
     /// # Errors
     ///
     /// Returns an I/O error if reading `input` or writing `output` fails.
-    pub fn serve(&self, input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
-        for line in input.lines() {
-            let line = line?;
-            if line.trim().is_empty() {
-                continue;
+    pub fn serve(&self, mut input: impl BufRead, mut output: impl Write) -> std::io::Result<()> {
+        let mut buf = Vec::new();
+        loop {
+            buf.clear();
+            if input.read_until(b'\n', &mut buf)? == 0 {
+                return Ok(());
             }
-            let response = match serde_json::from_str::<Value>(&line) {
-                Ok(message) => self.handle(&message),
-                Err(e) => Some(json!({
-                    "jsonrpc": "2.0",
-                    "id": null,
-                    "error": {"code": -32700, "message": format!("parse error: {e}")}
-                })),
+            let response = match std::str::from_utf8(&buf) {
+                Err(e) => Some(error_response(
+                    &Value::Null,
+                    -32700,
+                    &format!("parse error: {e}"),
+                )),
+                Ok(line) if line.trim().is_empty() => continue,
+                Ok(line) => match serde_json::from_str::<Value>(line) {
+                    Ok(message) => self.handle(&message),
+                    Err(e) => Some(error_response(
+                        &Value::Null,
+                        -32700,
+                        &format!("parse error: {e}"),
+                    )),
+                },
             };
             if let Some(response) = response {
                 serde_json::to_writer(&mut output, &response)?;
@@ -133,7 +174,6 @@ impl Server {
                 output.flush()?;
             }
         }
-        Ok(())
     }
 }
 

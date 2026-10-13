@@ -3,7 +3,7 @@
 use std::io::Cursor;
 
 use llm_secret_vault::capture::Clipboard;
-use llm_secret_vault::mcp::Server;
+use llm_secret_vault::mcp::{PROTOCOL_VERSION, Server};
 use llm_secret_vault::{Result, Vault};
 use serde_json::{Value, json};
 
@@ -52,7 +52,7 @@ fn tool(server: &Server, name: &str, arguments: &Value) -> (String, bool) {
 }
 
 #[test]
-fn initialize_echoes_protocol_version() {
+fn initialize_echoes_supported_protocol_version() {
     let response = call(
         &server(),
         1,
@@ -62,6 +62,133 @@ fn initialize_echoes_protocol_version() {
     assert_eq!(response["result"]["protocolVersion"], "2025-03-26");
     assert_eq!(response["result"]["serverInfo"]["name"], "llm-secret-vault");
     assert!(response["result"]["capabilities"]["tools"].is_object());
+}
+
+#[test]
+fn initialize_falls_back_for_unknown_protocol_version() {
+    let response = call(
+        &server(),
+        1,
+        "initialize",
+        &json!({"protocolVersion": "1999-01-01"}),
+    );
+    assert_eq!(response["result"]["protocolVersion"], PROTOCOL_VERSION);
+}
+
+#[test]
+fn ping_and_id_echo() {
+    let response = call(&server(), 42, "ping", &json!({}));
+    assert_eq!(response["id"], 42);
+    assert_eq!(response["result"], json!({}));
+    let response = server()
+        .handle(&json!({"jsonrpc": "2.0", "id": "abc", "method": "ping"}))
+        .unwrap();
+    assert_eq!(response["id"], "abc");
+}
+
+#[test]
+fn invalid_requests_get_32600() {
+    let server = server();
+    for (message, id) in [
+        (json!(42), Value::Null),
+        (
+            json!([{"jsonrpc": "2.0", "id": 1, "method": "ping"}]),
+            Value::Null,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": [1], "method": "ping"}),
+            Value::Null,
+        ),
+        (
+            json!({"jsonrpc": "2.0", "id": null, "method": "ping"}),
+            Value::Null,
+        ),
+        (json!({"id": 5, "method": "ping"}), json!(5)),
+        (
+            json!({"jsonrpc": "1.0", "id": 6, "method": "ping"}),
+            json!(6),
+        ),
+        (json!({"jsonrpc": "2.0", "id": 8}), json!(8)),
+    ] {
+        let response = server.handle(&message).expect("error response");
+        assert_eq!(response["error"]["code"], -32600, "{message}");
+        assert_eq!(response["id"], id, "{message}");
+    }
+    assert!(server.handle(&json!({"method": "ping"})).is_none());
+}
+
+#[test]
+fn tools_call_needs_params_and_name() {
+    let server = server();
+    for params in [None, Some(json!({"arguments": {}}))] {
+        let mut message = json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call"});
+        if let Some(params) = params {
+            message["params"] = params;
+        }
+        assert_eq!(server.handle(&message).unwrap()["error"]["code"], -32602);
+    }
+}
+
+#[test]
+fn generate_refuses_existing_name_without_overwrite() {
+    let server = server();
+    let (_, is_error) = tool(&server, "secret_generate", &json!({"name": "db"}));
+    assert!(!is_error);
+    let (_, is_error) = tool(&server, "secret_generate", &json!({"name": "db"}));
+    assert!(is_error);
+    let (_, is_error) = tool(
+        &server,
+        "secret_generate",
+        &json!({"name": "db", "overwrite": true}),
+    );
+    assert!(!is_error);
+}
+
+#[cfg(unix)]
+#[test]
+fn run_rejects_unknown_secret_and_bad_env_var_without_spawning() {
+    let server = server();
+    let marker = std::env::temp_dir().join(format!("lsv-mcp-marker-{}", std::process::id()));
+    let _ = std::fs::remove_file(&marker);
+    let touch = format!("touch {}", marker.display());
+    let (text, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["sh", "-c", touch], "env": {"T": "missing"}}),
+    );
+    assert!(is_error);
+    assert_eq!(text, "no secret named `missing`");
+    tool(&server, "secret_capture", &json!({"name": "resend"}));
+    let (_, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["sh", "-c", touch], "env": {"1BAD": "resend"}}),
+    );
+    assert!(is_error);
+    assert!(!marker.exists());
+}
+
+#[test]
+fn run_rejects_out_of_range_limits() {
+    let server = server();
+    for (field, value) in [
+        ("timeout_s", json!(0)),
+        ("timeout_s", json!(3601)),
+        ("timeout_s", json!(u64::MAX)),
+        ("max_output_kb", json!(0)),
+        ("max_output_kb", json!(1025)),
+        ("max_output_kb", json!(u64::MAX)),
+    ] {
+        let mut args = json!({"argv": ["true"]});
+        args[field] = value;
+        let (text, is_error) = tool(&server, "secret_run", &args);
+        assert!(is_error, "{field}");
+        assert!(
+            text.starts_with(&format!("invalid usage: {field} must be between"))
+                || text.contains(field),
+            "{text}"
+        );
+    }
 }
 
 #[test]
@@ -169,26 +296,30 @@ fn unknown_method_is_a_protocol_error() {
 }
 
 #[test]
-fn serve_handles_newline_delimited_stream() {
-    let input = concat!(
-        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#,
-        "\n",
-        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
-        "\n",
-        "\n",
-        "not json\n",
-        r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
-        "\n",
+fn serve_survives_bad_lines_and_leaks_nothing() {
+    let mut input = Vec::new();
+    input.extend_from_slice(br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18"}}"#);
+    input.extend_from_slice(b"\n");
+    input.extend_from_slice(br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#);
+    input.extend_from_slice(b"\n\nnot json\n\xff\xfe bad utf8\n");
+    input.extend_from_slice(
+        br#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"secret_capture","arguments":{"name":"resend"}}}"#,
     );
+    input.extend_from_slice(b"\n");
+    input.extend_from_slice(br#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#);
+    input.extend_from_slice(b"\n");
     let mut output = Vec::new();
     server().serve(Cursor::new(input), &mut output).unwrap();
-    let lines: Vec<Value> = String::from_utf8(output)
-        .unwrap()
+    let text = String::from_utf8(output).unwrap();
+    assert!(!text.contains(SECRET), "leak in {text}");
+    let lines: Vec<Value> = text
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
         .collect();
-    assert_eq!(lines.len(), 3);
+    assert_eq!(lines.len(), 5);
     assert_eq!(lines[0]["id"], 1);
     assert_eq!(lines[1]["error"]["code"], -32700);
-    assert_eq!(lines[2]["id"], 2);
+    assert_eq!(lines[2]["error"]["code"], -32700);
+    assert_eq!(lines[3]["id"], 3);
+    assert_eq!(lines[4]["id"], 2);
 }
