@@ -1,6 +1,6 @@
 //! The vault service: store, describe and delete secrets by name.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -12,7 +12,7 @@ use crate::fingerprint::fingerprint;
 use crate::index::Index;
 use crate::name::SecretName;
 
-/// Minimum accepted length of a secret value, in characters.
+/// Minimum accepted length of a secret value, in bytes.
 pub const MIN_VALUE_LEN: usize = 4;
 /// Maximum accepted length of a secret value, in bytes.
 pub const MAX_VALUE_LEN: usize = 16 * 1024;
@@ -56,6 +56,8 @@ pub struct Vault {
 struct Inner {
     backend: Box<dyn Backend>,
     index: Index,
+    /// Serializes `store` and `delete` within this process.
+    write_lock: Mutex<()>,
 }
 
 fn now_secs() -> u64 {
@@ -99,7 +101,11 @@ impl Vault {
 
     fn with_parts(backend: Box<dyn Backend>, index: Index) -> Self {
         Self {
-            inner: Arc::new(Inner { backend, index }),
+            inner: Arc::new(Inner {
+                backend,
+                index,
+                write_lock: Mutex::new(()),
+            }),
         }
     }
 
@@ -131,6 +137,15 @@ impl Vault {
     /// Returns [`ErrorKind::InvalidValue`] if the value length is out of range,
     /// [`ErrorKind::NameExists`] if the name exists and `overwrite` is false,
     /// [`ErrorKind::Keyring`] or [`ErrorKind::Index`] if storage fails.
+    ///
+    /// The fingerprint is computed before anything is stored. If the index
+    /// update fails after the keyring write succeeded, the error is returned
+    /// and the keyring keeps the new value (an overwritten old value is not
+    /// restored).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal write lock is poisoned.
     pub fn store(
         &self,
         name: &SecretName,
@@ -138,10 +153,10 @@ impl Vault {
         source: Source,
         overwrite: bool,
     ) -> Result<Meta> {
-        let len = value.chars().count();
-        if len < MIN_VALUE_LEN {
+        if value.len() < MIN_VALUE_LEN {
             return Err(Error::new(ErrorKind::InvalidValue(format!(
-                "{len} characters, minimum is {MIN_VALUE_LEN}"
+                "{} bytes, minimum is {MIN_VALUE_LEN}",
+                value.len()
             ))));
         }
         if value.len() > MAX_VALUE_LEN {
@@ -150,16 +165,18 @@ impl Vault {
                 value.len()
             ))));
         }
+        let _guard = self.inner.write_lock.lock().expect("write lock poisoned");
         let existing = self.inner.index.get(name);
         if existing.is_some() && !overwrite {
             return Err(Error::new(ErrorKind::NameExists(name.to_string())));
         }
+        let fingerprint = fingerprint(self.inner.backend.as_ref(), value)?;
         self.inner.backend.put(name.as_str(), value)?;
         let now = now_secs();
         let meta = Meta {
             name: name.clone(),
-            len,
-            fingerprint: fingerprint(self.inner.backend.as_ref(), value)?,
+            len: value.chars().count(),
+            fingerprint,
             source,
             created: existing.as_ref().map_or(now, |m| m.created),
             rotated: existing.map(|_| now),
@@ -174,9 +191,16 @@ impl Vault {
     ///
     /// Returns [`ErrorKind::UnknownName`] if the secret exists in neither,
     /// or [`ErrorKind::Keyring`] / [`ErrorKind::Index`] if deletion fails.
+    /// The keyring entry is deleted first, so a keyring failure leaves the
+    /// index entry in place.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal write lock is poisoned.
     pub fn delete(&self, name: &SecretName) -> Result<()> {
-        let in_index = self.inner.index.remove(name)?;
+        let _guard = self.inner.write_lock.lock().expect("write lock poisoned");
         let in_store = self.inner.backend.delete(name.as_str())?;
+        let in_index = self.inner.index.remove(name)?;
         if in_index || in_store {
             Ok(())
         } else {
@@ -245,11 +269,12 @@ mod tests {
     #[test]
     fn rejects_bad_lengths_without_echoing_value() {
         let vault = Vault::in_memory();
+        let marker = "zq9-DISTINCTIVE-marker-7731";
         let err = vault
-            .store(&name("k"), "abc", Source::Imported, false)
+            .store(&name("k"), &marker[..3], Source::Imported, false)
             .unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::InvalidValue(_)));
-        assert!(!err.to_string().contains("abc"));
+        assert!(!err.to_string().contains(marker));
         let big = "x".repeat(MAX_VALUE_LEN + 1);
         assert!(
             vault
@@ -287,5 +312,39 @@ mod tests {
             .store(&name("a"), "value-123", Source::Generated, false)
             .unwrap();
         assert_eq!(vault.list(None).len(), 1);
+        assert!(
+            vault
+                .inner
+                .backend
+                .resolve(crate::fingerprint::KEY_ACCOUNT)
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn value_length_bounds_are_in_bytes() {
+        let vault = Vault::in_memory();
+        let store = |v: &str| vault.store(&name("k"), v, Source::Imported, true);
+        assert!(store(&"x".repeat(MIN_VALUE_LEN)).is_ok());
+        assert!(store(&"x".repeat(MIN_VALUE_LEN - 1)).is_err());
+        // Two characters but exactly MIN_VALUE_LEN bytes.
+        assert!(store("\u{e9}\u{e9}").is_ok());
+        // One character but fewer than MIN_VALUE_LEN bytes.
+        assert!(store("\u{e9}").is_err());
+        assert!(store(&"x".repeat(MAX_VALUE_LEN)).is_ok());
+        assert!(store(&"x".repeat(MAX_VALUE_LEN + 1)).is_err());
+    }
+
+    #[test]
+    fn delete_of_unknown_name_does_not_create_index_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let vault = Vault::with_parts(
+            Box::new(MemoryBackend::default()),
+            Index::load(&path).unwrap(),
+        );
+        assert!(vault.delete(&name("nope")).is_err());
+        assert!(!path.exists());
     }
 }

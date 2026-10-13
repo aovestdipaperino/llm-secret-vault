@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
@@ -13,7 +14,9 @@ use crate::vault::Meta;
 
 const INDEX_VERSION: u32 = 1;
 
-#[derive(Debug, Serialize, Deserialize)]
+static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexFile {
     version: u32,
     secrets: BTreeMap<SecretName, Meta>,
@@ -29,6 +32,12 @@ impl IndexFile {
 }
 
 /// Metadata index persisted as JSON, or kept in memory when `path` is `None`.
+///
+/// Every mutation re-reads the file from disk, applies the change to that fresh
+/// copy and writes it back atomically, so updates from other processes are kept.
+/// There is no file locking (`std::fs::File::lock` needs a newer Rust than the
+/// crate's 1.85), so concurrent writers in different processes can still race
+/// in the small read-modify-write window.
 #[derive(Debug)]
 pub(crate) struct Index {
     path: Option<PathBuf>,
@@ -49,16 +58,22 @@ impl Index {
 
     pub(crate) fn load(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let file = match fs::read(&path) {
-            Ok(bytes) => serde_json::from_slice(&bytes)
-                .map_err(|e| index_err(format!("{}: {e}", path.display())))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => IndexFile::empty(),
-            Err(e) => return Err(index_err(format!("{}: {e}", path.display()))),
-        };
+        let file = Self::read_file(&path)?.unwrap_or_else(IndexFile::empty);
         Ok(Self {
             path: Some(path),
             state: Mutex::new(file),
         })
+    }
+
+    /// Reads and parses the index file, or returns `None` if it does not exist.
+    fn read_file(path: &Path) -> Result<Option<IndexFile>> {
+        match fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes)
+                .map(Some)
+                .map_err(|e| index_err(format!("{}: {e}", path.display()))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(index_err(format!("{}: {e}", path.display()))),
+        }
     }
 
     pub(crate) fn default_path() -> Result<PathBuf> {
@@ -85,16 +100,33 @@ impl Index {
     }
 
     pub(crate) fn upsert(&self, meta: Meta) -> Result<()> {
-        let mut state = self.state();
-        state.secrets.insert(meta.name.clone(), meta);
-        self.persist(&state)
+        self.mutate(|file| {
+            file.secrets.insert(meta.name.clone(), meta);
+            true
+        })
+        .map(|_| ())
     }
 
     pub(crate) fn remove(&self, name: &SecretName) -> Result<bool> {
+        self.mutate(|file| file.secrets.remove(name).is_some())
+    }
+
+    /// Applies `change` to a fresh copy of the index and persists it.
+    ///
+    /// `change` returns whether it modified anything; if not, nothing is written.
+    /// Memory is replaced only after the write succeeded.
+    fn mutate(&self, change: impl FnOnce(&mut IndexFile) -> bool) -> Result<bool> {
         let mut state = self.state();
-        let existed = state.secrets.remove(name).is_some();
-        self.persist(&state)?;
-        Ok(existed)
+        let mut next = match &self.path {
+            Some(path) => Self::read_file(path)?.unwrap_or_else(|| state.clone()),
+            None => state.clone(),
+        };
+        let changed = change(&mut next);
+        if changed {
+            self.persist(&next)?;
+        }
+        *state = next;
+        Ok(changed)
     }
 
     fn persist(&self, file: &IndexFile) -> Result<()> {
@@ -106,9 +138,16 @@ impl Index {
             fs::create_dir_all(dir).map_err(io)?;
         }
         let bytes = serde_json::to_vec_pretty(file).map_err(|e| index_err(e.to_string()))?;
-        let tmp = path.with_extension("json.tmp");
+        let tmp = path.with_extension(format!(
+            "json.{}.{}.tmp",
+            std::process::id(),
+            TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
         fs::write(&tmp, bytes).map_err(io)?;
-        fs::rename(&tmp, path).map_err(io)
+        fs::rename(&tmp, path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            io(e)
+        })
     }
 }
 
@@ -151,5 +190,36 @@ mod tests {
             Index::load(&path).unwrap_err().kind(),
             ErrorKind::Index(_)
         ));
+    }
+
+    #[test]
+    fn remove_of_absent_name_does_not_write_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let index = Index::load(&path).unwrap();
+        assert!(!index.remove(&SecretName::new("nope").unwrap()).unwrap());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn concurrent_handles_do_not_lose_updates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let one = Index::load(&path).unwrap();
+        let two = Index::load(&path).unwrap();
+        one.upsert(meta("a")).unwrap();
+        two.upsert(meta("b")).unwrap();
+        let fresh = Index::load(&path).unwrap();
+        assert_eq!(fresh.list(None), vec![meta("a"), meta("b")]);
+    }
+
+    #[test]
+    fn failed_persist_leaves_memory_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = Index::load(dir.path().join("sub").join("index.json")).unwrap();
+        // The parent "directory" becomes a regular file, so persisting must fail.
+        fs::write(dir.path().join("sub"), "x").unwrap();
+        assert!(index.upsert(meta("a")).is_err());
+        assert!(index.list(None).is_empty());
     }
 }
