@@ -11,6 +11,7 @@ homepage = "https://github.com/aovestdipaperino/llm-secret-vault"
 readme = "README.md"
 keywords = ["mcp", "secrets", "keyring", "llm", "claude"]
 categories = ["command-line-utilities", "authentication"]
+exclude = ["docs/superpowers/", ".github/", ".superpowers/"]
 
 [[bin]]
 name = "lsv"

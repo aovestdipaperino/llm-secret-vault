@@ -1,7 +1,7 @@
 # llm-secret-vault design
 
 This document describes how `lsv` keeps secrets out of an agent's context.
-It was written before implementation and is kept in sync with the code.
+It is kept in sync with the code.
 
 ## Problem
 
@@ -71,14 +71,14 @@ nothing for the hook to enforce).
 
 | Module | Responsibility | Depends on |
 |---|---|---|
-| `backend` | `trait Backend { put, delete, exists, resolve }`; `KeyringBackend` over the `keyring` crate; `MemoryBackend` for tests. `resolve` is `pub(crate)`. | keyring |
+| `backend` | `pub(crate) trait Backend { put, resolve, delete }`; `KeyringBackend` over the `keyring` crate; `MemoryBackend` for tests. The trait and `resolve` are `pub(crate)`. | keyring |
 | `index` | Names and metadata in `index.json` under the platform config dir (`dirs`). Never values. Needed because `keyring` cannot enumerate entries on every platform. | serde, dirs |
 | `fingerprint` | HMAC key stored as reserved keyring entry `__lsv_hmac_key__`, created on first use. | hmac, sha2, backend |
 | `capture` | Clipboard to backend, then conditional clear. | arboard, backend, index |
 | `generate` | Random value via `getrandom`, chosen length and alphabet, stored blind. | getrandom, backend, index |
 | `import` | Hidden interactive prompt, entered twice; refuses without a TTY. CLI only. | rpassword, backend, index |
 | `inject` | Parse references, resolve, spawn child, collect output through `redact`, enforce timeout and output cap. | backend, redact |
-| `redact` | Streaming replacement of each value with `«redacted:name»`. Covers raw, base64 (standard and URL-safe, padded and unpadded, plus the base64 prefix of complete 3-byte groups so a secret followed by other bytes in a blob is still caught), percent-encoding and hex (lower and upper). Correct across read-chunk boundaries; overlapping or touching matches merge into one span. Not covered: base64 of a secret at a non-zero offset inside a larger blob, and deliberate transformations. | none |
+| `redact` | Streaming replacement of each value with `«redacted:name»`. Covers raw, base64 (standard and URL-safe, padded and unpadded, plus the base64 prefix of complete 3-byte groups so a secret followed by other bytes in a blob is still caught), percent-encoding (uppercase `%XX`), the JSON string-escaped form of the value, and hex (lower and upper). Correct across read-chunk boundaries; overlapping or touching matches merge into one span. Not covered: base64 of a secret at a non-zero offset inside a larger blob, and deliberate transformations. | none |
 | `mcp` | Hand-written JSON-RPC 2.0 over stdio (initialize, tools/list, tools/call) with serde. | all core modules |
 | `hook` | Parse Claude Code `PreToolUse` JSON, apply deny rules, emit decision JSON. | none |
 | `cli` | clap subcommands. | all core modules |
@@ -176,11 +176,14 @@ cannot wedge the user's session.
 
 ## Error handling
 
-One `Error` enum (`thiserror`) with variants for keyring unavailable or
-locked, unknown name, name exists, invalid name, clipboard unavailable,
-validation failed, spawn failed, timeout. MCP maps them to tool results with
-`isError: true` and a message; messages never include values. Keyring locked
-(e.g. macOS over SSH) is reported as such with a hint.
+One `Error` struct carries a `Backtrace` and a `#[non_exhaustive]` `ErrorKind`
+(invalid name, unknown name, name exists, invalid value, keyring, clipboard,
+index, random, spawn, I/O, no TTY, usage). A timeout is not an error: `run`
+returns normally with `timed_out: true` in its output. MCP maps errors to tool
+results with `isError: true` and a message; messages never include values.
+Keyring failures other than a missing entry get the hint "is the keychain
+locked or unavailable (e.g. over SSH)?" appended to the OS message, which
+covers the macOS-over-SSH case without inspecting platform error codes.
 
 ## Testing
 
@@ -202,6 +205,7 @@ validation failed, spawn failed, timeout. MCP maps them to tool results with
 ## Repository
 
 Public GitHub repo `aovestdipaperino/llm-secret-vault`, MIT license, README
-with quickstart and an honest threat model, `docs/DESIGN.md` derived from this
-spec, CI workflow. Cargo metadata: author Enzo Lombardi
+with quickstart and an honest threat model, this document, and a CI workflow
+(including an MSRV job). The published package excludes `docs/superpowers/`,
+`.github/` and `.superpowers/`. Cargo metadata: author Enzo Lombardi
 <enzinol@gmail.com>, repository under `aovestdipaperino`.

@@ -21,18 +21,24 @@ you    the NAS root password is in the clipboard, save it as nas-root and back u
 
 agent  -> secret_capture(name="nas-root")
        <- stored nas-root: 18 chars, fp 3a9c01e2, clipboard cleared
-agent  -> secret_run(argv=["sshpass","-e","ssh","root@nas","tar czf - /data"], env={"SSHPASS":"nas-root"})
+agent  -> secret_run(argv=["sshpass","-e","ssh","root@nas","tar czf /backup/data.tgz /data"], env={"SSHPASS":"nas-root"})
        <- exit 0
 ```
+
+`lsv run` and `secret_run` return text. Binary stdout is decoded lossily, so
+write binary output to a file (as above) instead of streaming it through the
+tool.
 
 ## Install
 
 ```bash
-cargo install llm-secret-vault      # installs the `lsv` binary
+cargo install --git https://github.com/aovestdipaperino/llm-secret-vault   # installs the `lsv` binary
 lsv setup claude                    # prints the MCP and hook setup for Claude Code
 ```
 
-On Linux, building needs `libdbus-1-dev` and `pkg-config`.
+The crate is not published on crates.io yet, hence the git install. On Linux,
+building needs `libdbus-1-dev` and `pkg-config`, and running needs a Secret
+Service provider (such as gnome-keyring) that is running and unlocked.
 
 ## Use it yourself
 
@@ -77,9 +83,19 @@ server speaks MCP protocol versions 2025-06-18, 2025-03-26 and 2024-11-05 and
 rejects JSON-RPC batches. It re-reads the secret index on every request, so a
 secret you add from the CLI is visible to an already running server.
 
+## Exit codes
+
+`lsv`'s own errors (bad arguments, unknown secret, keyring failure) exit with
+code 2. Otherwise `lsv run` exits with the child's exit code, or 1 if the
+child was killed by a signal or timed out. This is ambiguous: a child that
+exits 2 on its own looks the same as an `lsv` error, so check the message on
+stderr when it matters.
+
 ## The guard hook
 
-`lsv hook` is a Claude Code `PreToolUse` hook for Bash. It analyses every
+`lsv hook` is a Claude Code `PreToolUse` hook for the Bash tool only. The argv
+of an MCP `secret_run` call is not checked by the hook, although its output is
+still redacted. The hook analyses every
 `lsv run` in a command line (including `lsv` invoked by path) and blocks
 children that echo or encode an injected variable or dump the environment
 (`printenv`, `env` with only options, bare `set`, `export`, `export -p`). It
@@ -100,7 +116,9 @@ catches the common tricks. Treat it as a seatbelt, not a sandbox.
 Within that scope, some specifics are worth knowing. Redaction covers the raw
 value, base64 (standard and URL-safe, padded and unpadded, including the
 prefix of a base64 blob when the secret is followed by other bytes),
-percent-encoding, and hex in both cases; overlapping matches are merged into
+percent-encoding (uppercase `%XX` only), the JSON string-escaped form (for
+values containing quotes, backslashes or slashes that get echoed inside a JSON
+document), and hex in both cases; overlapping matches are merged into
 one marker. It does not cover a secret that is base64-encoded at a non-zero
 offset inside a larger blob, a value printed only in part, or any deliberate
 transformation.
@@ -114,8 +132,11 @@ offline. Storage, encryption and locking are the OS keyring's; on macOS over
 plain SSH the login keychain is locked and `lsv` reports the keyring as
 unavailable.
 
-The metadata index (`index.json`, names and timestamps only, never values) is
-not protected by file locking. It is re-read before every write, but two
+The metadata index holds names, lengths, keyed fingerprints, source and
+timestamps, never values. It lives at `dirs::config_dir()/llm-secret-vault/index.json`
+(for example `~/Library/Application Support/llm-secret-vault/index.json` on
+macOS, `~/.config/llm-secret-vault/index.json` on Linux) and is written with
+mode 0600 on Unix. It is not protected by file locking. It is re-read before every write, but two
 processes writing at the same instant can still race in a small window. On
 Windows there is no process-group kill, so a timeout kills the child but not
 its grandchildren.
