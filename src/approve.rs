@@ -153,9 +153,71 @@ pub fn from_env(context: Context) -> Result<Box<dyn Approver>> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn platform_approver(ttl: Duration) -> Box<dyn Approver> {
+    Box::new(Cached::new(TouchId, ttl))
+}
+
+#[cfg(not(target_os = "macos"))]
 fn platform_approver(_ttl: Duration) -> Box<dyn Approver> {
     eprintln!("lsv: Touch ID approval is only available on macOS; continuing without it");
     Box::new(AllowAll)
+}
+
+/// Asks for Touch ID, or the login password, through `LocalAuthentication`.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TouchId;
+
+#[cfg(target_os = "macos")]
+impl Approver for TouchId {
+    fn approve(&self, reason: &str) -> Result<()> {
+        if evaluate_device_owner(reason) {
+            Ok(())
+        } else {
+            Err(Error::from_kind(ErrorKind::Denied(
+                "Touch ID approval was denied or cancelled".to_owned(),
+            )))
+        }
+    }
+}
+
+/// Runs `LAPolicy::DeviceOwnerAuthentication` and waits for the reply.
+///
+/// Returns `false` if the user fails, cancels, or the reply never arrives.
+#[cfg(target_os = "macos")]
+fn evaluate_device_owner(reason: &str) -> bool {
+    use std::sync::mpsc;
+
+    use block2::RcBlock;
+    use objc2::runtime::Bool;
+    use objc2_foundation::{NSError, NSString};
+    use objc2_local_authentication::{LAContext, LAPolicy};
+
+    let (tx, rx) = mpsc::channel::<bool>();
+    let reply = RcBlock::new(move |success: Bool, _error: *mut NSError| {
+        // The receiver may be gone only if this thread stopped waiting.
+        let _ = tx.send(success.as_bool());
+    });
+    let reason = NSString::from_str(reason);
+    // SAFETY: `+[LAContext new]` has no preconditions and returns an owned,
+    // initialised context.
+    let context = unsafe { LAContext::new() };
+    // SAFETY: `context`, `reason` and `reply` are valid for the call; the
+    // policy is a defined `LAPolicy` constant; the block only touches an
+    // owned `Sender`, which is safe to use from LocalAuthentication's private
+    // queue, and ignores the error pointer. `context` outlives the reply
+    // because we block on `rx` before dropping it.
+    unsafe {
+        context.evaluatePolicy_localizedReason_reply(
+            LAPolicy::DeviceOwnerAuthentication,
+            &reason,
+            &reply,
+        );
+    }
+    let approved = rx.recv().unwrap_or(false);
+    drop(context);
+    approved
 }
 
 /// Describes `request` for an approval prompt, naming secrets but never values.
@@ -269,6 +331,13 @@ mod tests {
             run_reason(&request),
             "run \"sh -c echo hi {{api}}\" with secrets api, tok"
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "shows a real Touch ID prompt; run by hand"]
+    fn touch_id_prompt() {
+        TouchId.approve("test llm-secret-vault Touch ID").unwrap();
     }
 
     #[test]

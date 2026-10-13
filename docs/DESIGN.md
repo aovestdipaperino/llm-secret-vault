@@ -80,7 +80,8 @@ nothing for the hook to enforce).
 | `inject` | Parse references, resolve, spawn child, collect output through `redact`, enforce timeout and output cap. | backend, redact |
 | `redact` | Streaming replacement of each value with `«redacted:name»`. Covers raw, base64 (standard and URL-safe, padded and unpadded, plus the base64 prefix of complete 3-byte groups so a secret followed by other bytes in a blob is still caught), percent-encoding (uppercase `%XX`), the JSON string-escaped form of the value, and hex (lower and upper). Correct across read-chunk boundaries; overlapping or touching matches merge into one span. Not covered: base64 of a secret at a non-zero offset inside a larger blob, and deliberate transformations. | none |
 | `mcp` | Hand-written JSON-RPC 2.0 over stdio (initialize, tools/list, tools/call) with serde. | all core modules |
-| `hook` | Parse `PreToolUse` JSON, apply deny rules; the CLI blocks with exit 2 and the reason on stderr. | none |
+| `approve` | `Approver` trait consulted before secrets are injected. `LSV_TOUCH_ID` selects the mode: `off`, `mcp` (default, MCP `secret_run` only) or `all` (also `lsv run`). On macOS `TouchId` evaluates `LAPolicy::DeviceOwnerAuthentication` through LocalAuthentication (Touch ID, falling back to the login password) with the reason `run "<cmd>" with secrets <a, b>`: argv joined and cut to 80 characters, placeholders unexpanded, names sorted, never a value. It blocks on the reply block through a channel; denial or cancel fails with `Touch ID approval was denied or cancelled`. `Cached` skips the prompt for `LSV_TOUCH_ID_TTL` seconds after a success (default 300, max 3600, 0 asks every time; failures are not cached). Other platforms print a notice and allow. Asked only when secrets are referenced, after their names are known to exist. It cannot replace the Keychain password dialog: biometric access control needs the data-protection keychain, a Developer ID signature and entitlements, which a `cargo install` build lacks, and "Always Allow" is tied to the exact binary so it asks again after each rebuild. | block2, objc2, objc2-foundation, objc2-local-authentication (macOS only) |
+| `hook` | Parse `PreToolUse` JSON, apply deny rules; the CLI blocks with exit 2 and the reason on stderr. `check_run` applies the same rules to an MCP `secret_run` argv. | none |
 | `cli` | clap subcommands. | all core modules |
 
 Keyring entries use service `llm-secret-vault` and the secret name as account.
@@ -168,6 +169,24 @@ matches:
   `find-internet-password` with `-w`/`-g`, `secret-tool lookup`, `cmdkey /list`
   with `/pass`, PowerShell `Get-StoredCredential`.
 - Reading `/proc/*/environ`.
+
+MCP `secret_run` arguments never pass through the hook, so the server applies
+the same rules itself through `hook::check_run(argv, vars)`, with the argv
+joined by spaces as the shell text and the `env` keys as the injected
+variables. It runs before anything is resolved; a match fails the call with
+`ErrorKind::Denied` and the message `refused by llm-secret-vault: <reason>`,
+and nothing is spawned. `lsv run` from the CLI is not checked this way; the
+Bash hook covers agents that use it through the shell.
+
+After the guard and the check that every referenced name exists, the
+`approve` step runs: with `LSV_TOUCH_ID` at `mcp` (default) or `all` on macOS
+it shows a Touch ID prompt naming the command and the secrets, never their
+values, and a denial or cancel refuses the run with
+`Touch ID approval was denied or cancelled`. A success is remembered for
+`LSV_TOUCH_ID_TTL` seconds (default 300). For the MCP server set the variables
+where it is registered, for example
+`claude mcp add --scope user -e LSV_TOUCH_ID=all llm-secret-vault -- lsv mcp`
+for Claude Code, or an `env` key on the server entry in plank's `.mcp.json`.
 
 The hook is heuristic: quote stripping is approximate and it is a safety net,
 not a parser.

@@ -96,9 +96,11 @@ stderr when it matters.
 
 `lsv hook` is a `PreToolUse` hook for the shell tool only (`Bash` in Claude
 Code, `bash` in plank). It blocks by exiting 2 with the reason on stderr,
-which both hosts show to the model. The argv
-of an MCP `secret_run` call is not checked by the hook, although its output is
-still redacted. The hook analyses every
+which both hosts show to the model. The argv of an MCP `secret_run` call,
+which the hook never sees, is checked by the same rules inside the server
+before anything is resolved; a match fails the call with
+`refused by llm-secret-vault: <reason>` and nothing is spawned. The hook
+analyses every
 `lsv run` in a command line (including `lsv` invoked by path) and blocks
 children that echo or encode an injected variable or dump the environment
 (`printenv`, `env` with only options, bare `set`, `export`, `export -p`). It
@@ -107,6 +109,55 @@ or `secret-tool lookup`. Echo or printf with redirection is allowed. The hook
 is a heuristic over shell text, and its quote stripping is approximate. If it
 cannot parse its input it allows the command and prints a warning, so it can
 never wedge your session.
+
+## Touch ID
+
+On macOS `lsv` can ask for your fingerprint before it injects secrets into a
+command. The `LSV_TOUCH_ID` variable picks when: `off` never asks, `mcp` (the
+default) asks for MCP `secret_run` calls, and `all` also asks for `lsv run`
+from the command line. Nothing is asked for commands that use no secrets, and
+an unknown secret name fails before any prompt appears.
+
+The prompt reads `"lsv" is trying to run "<command>" with secrets <names>`,
+where the command is the argv joined with spaces, cut to 80 characters, and
+the names are listed in alphabetical order. Placeholders appear as
+`{{name}}`, never expanded, so no secret value is ever shown. Touch ID falls
+back to your login password when no finger is enrolled or the sensor is not
+available. Cancelling or failing the prompt refuses the run with
+`Touch ID approval was denied or cancelled`, and the command is not started.
+
+After a successful approval the server does not ask again for
+`LSV_TOUCH_ID_TTL` seconds (default 300, maximum 3600; `0` asks every time).
+The approval is remembered by the running process only, so each `lsv run`
+from the shell asks on its own.
+
+The MCP server reads these variables from its own environment, so set them
+where the server is registered. For Claude Code:
+
+```bash
+claude mcp add --scope user -e LSV_TOUCH_ID=all llm-secret-vault -- lsv mcp
+```
+
+For plank, add an `env` key to the entry in `.mcp.json`:
+
+```json
+"llm-secret-vault": {
+  "command": "lsv",
+  "args": ["mcp"],
+  "env": { "LSV_TOUCH_ID": "mcp", "LSV_TOUCH_ID_TTL": "300" }
+}
+```
+
+On other platforms there is no fingerprint check: `lsv` prints a notice and
+continues without it.
+
+Touch ID is a separate check and does not replace the Keychain password
+dialog. Gating the Keychain item itself on biometrics needs the
+data-protection keychain and an access control, which only a binary signed
+with a Developer ID and the right entitlements can use, and a `cargo install`
+build has neither. For the same reason "Always Allow" in the Keychain dialog
+is tied to the exact binary, so macOS asks again after every rebuild or
+upgrade of `lsv`.
 
 ## Threat model
 
