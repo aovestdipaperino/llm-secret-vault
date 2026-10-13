@@ -1,0 +1,31 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Install Linux keyring dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config gnome-keyring dbus-x11
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets -- -D warnings
+      - run: cargo test
+      - name: Real keyring tests (Linux)
+        if: runner.os == 'Linux'
+        run: dbus-run-session -- sh -c 'printf ci | gnome-keyring-daemon --unlock --components=secrets && cargo test -- --ignored'
+      - name: Real keyring tests (macOS, Windows)
+        if: runner.os != 'Linux'
+        run: cargo test -- --ignored
