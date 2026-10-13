@@ -47,14 +47,14 @@ fn hook_denies_and_allows() {
 
     let out = hook(r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#);
     assert!(out.status.success());
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, b"");
 }
 
 #[test]
 fn hook_fails_open_on_garbage() {
     let out = hook("garbage");
     assert!(out.status.success());
-    assert!(out.stdout.is_empty());
+    assert_eq!(out.stdout, b"");
     assert!(String::from_utf8(out.stderr).unwrap().contains("warning"));
 }
 

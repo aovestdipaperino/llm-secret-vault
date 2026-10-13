@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(vault.info(&name("nas-root")).unwrap(), meta);
         assert_eq!(vault.list(None), vec![meta.clone()]);
         assert_eq!(vault.list(Some("nas")), vec![meta]);
-        assert!(vault.list(Some("hf")).is_empty());
+        assert_eq!(vault.list(Some("hf")), Vec::new());
         assert_eq!(
             vault
                 .resolve_for_injection(&name("nas-root"))
