@@ -43,6 +43,8 @@ pub enum ErrorKind {
     NoTty,
     /// The caller supplied malformed arguments.
     Usage(String),
+    /// A command was refused because it would leak a secret.
+    Denied(String),
 }
 
 impl Error {
@@ -87,7 +89,7 @@ impl fmt::Display for Error {
             ErrorKind::Spawn(why) => write!(f, "could not run command: {why}"),
             ErrorKind::Io(why) => write!(f, "I/O error: {why}"),
             ErrorKind::NoTty => write!(f, "this command needs an interactive terminal"),
-            ErrorKind::Usage(why) => write!(f, "{why}"),
+            ErrorKind::Usage(why) | ErrorKind::Denied(why) => write!(f, "{why}"),
         }
     }
 }

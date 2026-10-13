@@ -1,6 +1,6 @@
 //! Guard hook rule table.
 
-use llm_secret_vault::hook::{Decision, check_command, evaluate};
+use llm_secret_vault::hook::{Decision, check_command, check_run, evaluate};
 
 const DENY: &[&str] = &[
     "security find-generic-password -s foo -w",
@@ -84,4 +84,55 @@ fn evaluates_hook_json() {
     assert_eq!(evaluate(other_tool).unwrap(), Decision::Allow);
     assert!(evaluate("not json").is_err());
     assert!(evaluate(r#"{"tool_name":"Bash","tool_input":{}}"#).is_err());
+}
+
+fn argv(parts: &[&str]) -> Vec<String> {
+    parts.iter().map(|p| (*p).to_owned()).collect()
+}
+
+#[test]
+fn check_run_denies_leaky_argv() {
+    let cases: &[(&[&str], &[&str])] = &[
+        (&["sh", "-c", "printf %s $T | base64"], &["T"]),
+        (&["sh", "-c", "echo $T"], &["T"]),
+        (&["printenv"], &["T"]),
+        (&["env"], &["T"]),
+        (&["echo", "{{tok}}"], &[]),
+        (&["security", "find-generic-password", "-s", "x", "-w"], &[]),
+        (&["sh", "-c", "echo ${T} | xxd"], &["T"]),
+    ];
+    for (parts, vars) in cases {
+        assert!(
+            matches!(check_run(&argv(parts), vars), Decision::Deny(_)),
+            "should deny: {parts:?}"
+        );
+    }
+}
+
+#[test]
+fn check_run_allows_normal_argv() {
+    let cases: &[(&[&str], &[&str])] = &[
+        (
+            &["curl", "-H", "Authorization: Bearer {{tok}}", "https://x"],
+            &[],
+        ),
+        (
+            &[
+                "sh",
+                "-c",
+                "printf %s \"$T\" | docker login --password-stdin",
+            ],
+            &["T"],
+        ),
+        (&["sshpass", "-e", "ssh", "root@nas"], &["PW"]),
+        (&["sh", "-c", "echo $T > f"], &["T"]),
+        (&["ls"], &[]),
+    ];
+    for (parts, vars) in cases {
+        assert_eq!(
+            check_run(&argv(parts), vars),
+            Decision::Allow,
+            "should allow: {parts:?}"
+        );
+    }
 }

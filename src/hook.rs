@@ -177,6 +177,24 @@ pub fn check_command(command: &str) -> Decision {
     Decision::Allow
 }
 
+/// Decides whether an MCP `secret_run` argv may run.
+///
+/// Applies the `lsv run` child rules to `argv` joined with spaces, with
+/// `vars` as the injected environment variable names.
+#[must_use]
+pub fn check_run(argv: &[String], vars: &[&str]) -> Decision {
+    let command = argv.join(" ");
+    for (pattern, reason) in DIRECT_READS.iter() {
+        if pattern.is_match(&command) {
+            return Decision::Deny((*reason).to_owned());
+        }
+    }
+    match check_child(&command, vars) {
+        Some(reason) => Decision::Deny(reason),
+        None => Decision::Allow,
+    }
+}
+
 /// Evaluates a `PreToolUse` hook payload.
 ///
 /// The shell tool is matched case-insensitively (`Bash` in Claude Code,

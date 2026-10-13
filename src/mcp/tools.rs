@@ -13,6 +13,7 @@ use super::ClipboardFactory;
 use crate::capture::{CaptureOptions, capture};
 use crate::error::{Error, ErrorKind, Result};
 use crate::generate::{Alphabet, GenerateOptions, generate};
+use crate::hook::{Decision, check_run};
 use crate::inject::{RunRequest, run};
 use crate::name::SecretName;
 use crate::vault::Vault;
@@ -230,6 +231,12 @@ pub(super) fn call(
                 DEFAULT_MAX_OUTPUT_KB,
                 &OUTPUT_RANGE_KB,
             )?;
+            let vars: Vec<&str> = args.env.keys().map(String::as_str).collect();
+            if let Decision::Deny(reason) = check_run(&args.argv, &vars) {
+                return Err(Error::new(ErrorKind::Denied(format!(
+                    "refused by llm-secret-vault: {reason}"
+                ))));
+            }
             let mut request = RunRequest::new(args.argv)
                 .timeout(Duration::from_secs(timeout_s))
                 .max_output_bytes(output_kb.saturating_mul(1024));

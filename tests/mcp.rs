@@ -258,12 +258,27 @@ fn run_redacts_output() {
     let (text, is_error) = tool(
         &server,
         "secret_run",
-        &json!({"argv": ["sh", "-c", "echo token=$T"], "env": {"T": "resend"}}),
+        &json!({"argv": ["sh", "-c", "echo token=$T > /dev/stdout"], "env": {"T": "resend"}}),
     );
     assert!(!is_error, "{text}");
     let out: Value = serde_json::from_str(&text).unwrap();
     assert_eq!(out["stdout"], "token=«redacted:resend»\n");
     assert_eq!(out["exit_code"], 0);
+}
+
+#[cfg(unix)]
+#[test]
+fn run_refuses_leaky_commands() {
+    let server = server();
+    tool(&server, "secret_capture", &json!({"name": "resend"}));
+    let (text, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["sh", "-c", "printf %s $T | base64"], "env": {"T": "resend"}}),
+    );
+    assert!(is_error, "{text}");
+    assert!(text.starts_with("refused by llm-secret-vault: "), "{text}");
+    assert!(!text.contains(SECRET), "{text}");
 }
 
 #[test]
