@@ -86,12 +86,26 @@ impl Index {
         self.state.lock().expect("index mutex poisoned")
     }
 
+    /// Locks the state after refreshing it from disk when file-backed.
+    ///
+    /// A missing file means empty. If the file cannot be read or parsed, the
+    /// last known state is kept.
+    fn fresh_state(&self) -> MutexGuard<'_, IndexFile> {
+        let mut state = self.state();
+        if let Some(path) = &self.path {
+            if let Ok(file) = Self::read_file(path) {
+                *state = file.unwrap_or_else(IndexFile::empty);
+            }
+        }
+        state
+    }
+
     pub(crate) fn get(&self, name: &SecretName) -> Option<Meta> {
-        self.state().secrets.get(name).cloned()
+        self.fresh_state().secrets.get(name).cloned()
     }
 
     pub(crate) fn list(&self, prefix: Option<&str>) -> Vec<Meta> {
-        self.state()
+        self.fresh_state()
             .secrets
             .values()
             .filter(|m| prefix.is_none_or(|p| m.name.as_str().starts_with(p)))
@@ -118,7 +132,7 @@ impl Index {
     fn mutate(&self, change: impl FnOnce(&mut IndexFile) -> bool) -> Result<bool> {
         let mut state = self.state();
         let mut next = match &self.path {
-            Some(path) => Self::read_file(path)?.unwrap_or_else(|| state.clone()),
+            Some(path) => Self::read_file(path)?.unwrap_or_else(IndexFile::empty),
             None => state.clone(),
         };
         let changed = change(&mut next);
@@ -216,6 +230,17 @@ mod tests {
         assert_eq!(fresh.list(None), vec![meta("a"), meta("b")]);
     }
 
+    #[test]
+    fn reads_see_writes_from_another_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let a = Index::load(&path).unwrap();
+        let b = Index::load(&path).unwrap();
+        a.upsert(meta("a")).unwrap();
+        assert_eq!(b.get(&SecretName::new("a").unwrap()), Some(meta("a")));
+        assert_eq!(b.list(None), vec![meta("a")]);
+    }
+
     #[cfg(unix)]
     #[test]
     fn failed_persist_leaves_memory_unchanged() {
@@ -230,7 +255,7 @@ mod tests {
         let result = index.upsert(meta("b"));
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
         if result.is_ok() {
-            // Running with privileges that ignore permissions (e.g. root).
+            eprintln!("skipping: permissions are not enforced (running as root?)");
             return;
         }
         assert_eq!(index.list(None), vec![meta("a")]);
