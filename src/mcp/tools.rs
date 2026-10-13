@@ -248,7 +248,12 @@ pub(super) fn call(
             if let Some(dir) = args.cwd {
                 request = request.cwd(dir);
             }
-            if !request.secret_names().is_empty() {
+            let names = request.secret_names();
+            if !names.is_empty() {
+                // Fail on unknown names before showing a prompt.
+                for name in &names {
+                    vault.info(name)?;
+                }
                 approver.approve(&approve::run_reason(&request))?;
             }
             pretty(&run(vault, &request)?)

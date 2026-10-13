@@ -61,9 +61,7 @@ impl<A: Approver> Approver for Cached<A> {
             .approved_at
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(at) = *last
-            && at.elapsed() < self.ttl
-        {
+        if matches!(*last, Some(at) if at.elapsed() < self.ttl) {
             return Ok(());
         }
         self.inner.approve(reason)?;

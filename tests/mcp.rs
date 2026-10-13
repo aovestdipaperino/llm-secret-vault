@@ -414,3 +414,16 @@ fn run_without_secrets_skips_approval() {
     assert!(!is_error, "{text}");
     assert!(reasons.lock().unwrap().is_empty());
 }
+
+#[test]
+fn run_with_unknown_secret_fails_before_asking() {
+    let (server, reasons) = approving_server(true);
+    let (text, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["true", "{{missing}}"]}),
+    );
+    assert!(is_error);
+    assert!(text.contains("missing"), "{text}");
+    assert!(reasons.lock().unwrap().is_empty());
+}

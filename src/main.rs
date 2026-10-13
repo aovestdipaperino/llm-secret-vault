@@ -243,11 +243,16 @@ fn run_main(bindings: &[String], argv: Vec<String>) -> Result<ExitCode> {
         })?;
         request = request.env(var, SecretName::new(name)?);
     }
-    let approver = approve::from_env(Context::Cli)?;
-    if !request.secret_names().is_empty() {
-        approver.approve(&approve::run_reason(&request))?;
+    let vault = Vault::open()?;
+    let names = request.secret_names();
+    if !names.is_empty() {
+        // Fail on unknown names before showing a prompt.
+        for name in &names {
+            vault.info(name)?;
+        }
+        approve::from_env(Context::Cli)?.approve(&approve::run_reason(&request))?;
     }
-    let output = run(&Vault::open()?, &request)?;
+    let output = run(&vault, &request)?;
     std::io::stdout().write_all(output.stdout.as_bytes()).ok();
     std::io::stderr().write_all(output.stderr.as_bytes()).ok();
     if output.timed_out {
