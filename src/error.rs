@@ -37,6 +37,8 @@ pub enum ErrorKind {
     Random(String),
     /// A child process could not be started or awaited.
     Spawn(String),
+    /// An I/O operation failed (for example the MCP transport).
+    Io(String),
     /// An interactive terminal was required but not available.
     NoTty,
     /// The caller supplied malformed arguments.
@@ -83,6 +85,7 @@ impl fmt::Display for Error {
             ErrorKind::Index(why) => write!(f, "metadata index error: {why}"),
             ErrorKind::Random(why) => write!(f, "random source failed: {why}"),
             ErrorKind::Spawn(why) => write!(f, "could not run command: {why}"),
+            ErrorKind::Io(why) => write!(f, "I/O error: {why}"),
             ErrorKind::NoTty => write!(f, "this command needs an interactive terminal"),
             ErrorKind::Usage(why) => write!(f, "{why}"),
         }
@@ -101,6 +104,6 @@ impl Error {
     /// Wraps an I/O error that occurred during `context`.
     #[must_use]
     pub fn from_io(context: &str, err: &std::io::Error) -> Self {
-        Self::new(ErrorKind::Spawn(format!("{context}: {err}")))
+        Self::new(ErrorKind::Io(format!("{context}: {err}")))
     }
 }

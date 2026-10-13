@@ -14,7 +14,9 @@ fn entry(account: &str) -> Result<keyring::Entry> {
 }
 
 fn map_err(err: &keyring::Error) -> Error {
-    Error::new(ErrorKind::Keyring(err.to_string()))
+    Error::new(ErrorKind::Keyring(format!(
+        "{err}; is the keychain locked or unavailable (e.g. over SSH)?"
+    )))
 }
 
 impl Backend for KeyringBackend {

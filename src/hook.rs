@@ -50,7 +50,7 @@ static DIRECT_READS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 });
 
 static LSV_RUN: LazyLock<Regex> =
-    LazyLock::new(|| regex(r"(?:^|[\s;&|(])(?:[^\s;&|()]*/)?lsv\s+run\b"));
+    LazyLock::new(|| regex(r#"(?:^|[\s;&|("'`])(?:[^\s;&|()]*/)?lsv\s+run\b"#));
 static DOUBLE_DASH: LazyLock<Regex> = LazyLock::new(|| regex(r"\s--(\s|$)"));
 static BINDING: LazyLock<Regex> =
     LazyLock::new(|| regex(r"\b([A-Za-z_][A-Za-z0-9_]*)=[a-z0-9][a-z0-9._-]*"));

@@ -147,7 +147,7 @@ pub(super) fn definitions() -> Value {
         },
         {
             "name": "secret_run",
-            "description": "Run a command with secrets injected. Map env var names to secret names in `env`, or write {{secret-name}} inside any argument after the program. stdout/stderr come back with secret values replaced by «redacted:name». Do not try to print secrets.",
+            "description": "Run a command with secrets injected. Map env var names to secret names in `env`, or write {{secret-name}} inside any argv element, including the program. stdout/stderr come back with secret values replaced by «redacted:name». Do not try to print secrets.",
             "inputSchema": {
                 "type": "object",
                 "properties": {

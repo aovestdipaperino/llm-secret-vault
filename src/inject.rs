@@ -84,7 +84,7 @@ impl RunRequest {
     ///
     /// Background processes the command leaves in its process group are killed
     /// at the timeout, and [`run`] waits for them (and for the output pipes to
-    /// close) for up to `limit`.
+    /// close). In total [`run`] waits up to `limit` plus a 1 s grace period.
     #[must_use]
     pub fn timeout(mut self, limit: Duration) -> Self {
         self.timeout = Some(limit);
@@ -155,9 +155,13 @@ fn placeholders(arg: &str) -> Vec<(Range<usize>, SecretName)> {
 }
 
 fn substitute(arg: &str, values: &BTreeMap<SecretName, Zeroizing<String>>) -> Zeroizing<String> {
-    let mut out = Zeroizing::new(String::with_capacity(arg.len()));
+    let found = placeholders(arg);
+    // Sized up front so the buffer never reallocates (a realloc would leave an
+    // unzeroed copy of the value behind).
+    let capacity = arg.len() + found.iter().map(|(_, n)| values[n].len()).sum::<usize>();
+    let mut out = Zeroizing::new(String::with_capacity(capacity));
     let mut last = 0;
-    for (range, name) in placeholders(arg) {
+    for (range, name) in found {
         out.push_str(&arg[last..range.start]);
         out.push_str(values[&name].as_str());
         last = range.end;

@@ -157,7 +157,7 @@ impl Index {
             std::process::id(),
             TMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
-        if let Err(e) = fs::write(&tmp, bytes) {
+        if let Err(e) = write_private(&tmp, &bytes) {
             let _ = fs::remove_file(&tmp);
             return Err(io(e));
         }
@@ -166,6 +166,19 @@ impl Index {
             io(e)
         })
     }
+}
+
+/// Writes `bytes` to `path`, creating it with mode 0600 on Unix.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        options.mode(0o600);
+    }
+    options.open(path)?.write_all(bytes)
 }
 
 #[cfg(test)]
@@ -207,6 +220,18 @@ mod tests {
             Index::load(&path).unwrap_err().kind(),
             ErrorKind::Index(_)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn index_file_is_private() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        let index = Index::load(&path).unwrap();
+        index.upsert(meta("tok")).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
     }
 
     #[test]

@@ -79,7 +79,7 @@ impl FromStr for SecretName {
 
 impl fmt::Display for SecretName {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
+        f.pad(&self.0)
     }
 }
 
@@ -88,6 +88,7 @@ impl AsRef<str> for SecretName {
         &self.0
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -132,6 +133,13 @@ mod tests {
         assert_eq!(json, "\"nas-root\"");
         assert_eq!(serde_json::from_str::<SecretName>(&json).unwrap(), name);
         assert!(serde_json::from_str::<SecretName>("\"Bad\"").is_err());
+    }
+
+    #[test]
+    fn display_honours_width_and_alignment() {
+        let name = SecretName::new("ab").unwrap();
+        assert_eq!(format!("[{name:<6}]"), "[ab    ]");
+        assert_eq!(format!("[{name:>4}]"), "[  ab]");
     }
 
     #[test]

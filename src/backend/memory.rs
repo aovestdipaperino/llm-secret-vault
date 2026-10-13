@@ -42,6 +42,7 @@ impl Backend for MemoryBackend {
         Ok(self.entries().remove(account).is_some())
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

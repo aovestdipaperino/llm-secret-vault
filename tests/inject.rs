@@ -155,7 +155,6 @@ fn periodic_secret_flood_is_bounded_and_redacted() {
     assert!(!out.timed_out);
     assert!(!out.stdout.contains("abab"));
     assert!(out.stdout.len() <= 100);
-    assert!(!out.stdout.contains("abab"));
     assert!(start.elapsed() < Duration::from_secs(20));
 }
 

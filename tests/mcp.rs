@@ -184,8 +184,7 @@ fn run_rejects_out_of_range_limits() {
         let (text, is_error) = tool(&server, "secret_run", &args);
         assert!(is_error, "{field}");
         assert!(
-            text.starts_with(&format!("invalid usage: {field} must be between"))
-                || text.contains(field),
+            text.starts_with(&format!("{field} must be between")),
             "{text}"
         );
     }

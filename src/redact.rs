@@ -13,10 +13,11 @@ use std::fmt::{self, Write as _};
 
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+use zeroize::Zeroizing;
 
 #[derive(Clone)]
 struct Pattern {
-    bytes: Vec<u8>,
+    bytes: Zeroizing<Vec<u8>>,
     marker: Vec<u8>,
 }
 
@@ -47,6 +48,13 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
         hex::encode(raw).into_bytes(),
         hex::encode_upper(raw).into_bytes(),
     ];
+    // JSON string-escaped form, as it appears when echoed inside a document.
+    if let Ok(quoted) = serde_json::to_string(value) {
+        let escaped = &quoted[1..quoted.len() - 1];
+        if escaped != value {
+            all.push(escaped.as_bytes().to_vec());
+        }
+    }
     // Base64 of `secret + more`: only whole 3-byte groups are independent of
     // what follows, so cover that prefix (when it is long enough to be useful).
     if raw.len() % 3 != 0 {
@@ -106,7 +114,7 @@ impl Redactor {
             let marker = format!("«redacted:{label}»").into_bytes();
             for bytes in variants(value) {
                 patterns.push(Pattern {
-                    bytes,
+                    bytes: Zeroizing::new(bytes),
                     marker: marker.clone(),
                 });
             }
@@ -354,6 +362,17 @@ mod tests {
         assert_ne!(std_form, url_form);
         assert_eq!(redact(&[("k", value)], &url_form), "«redacted:k»");
         assert_eq!(redact(&[("k", value)], &std_form), "«redacted:k»");
+    }
+
+    #[test]
+    fn json_escaped_value_is_redacted_at_every_chunk_size() {
+        let value = r#"pa"ss\w/ord"#;
+        let doc = serde_json::json!({"echo": value}).to_string();
+        assert!(!doc.contains(value));
+        for size in 1..=doc.len() {
+            let out = chunked(&[("k", value)], doc.as_bytes(), size);
+            assert_eq!(out, r#"{"echo":"«redacted:k»"}"#, "chunk size {size}");
+        }
     }
 
     #[test]
