@@ -10,6 +10,7 @@ use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::ClipboardFactory;
+use crate::approve::{self, Approver};
 use crate::capture::{CaptureOptions, capture};
 use crate::error::{Error, ErrorKind, Result};
 use crate::generate::{Alphabet, GenerateOptions, generate};
@@ -169,6 +170,7 @@ pub(super) fn definitions() -> Value {
 pub(super) fn call(
     vault: &Vault,
     clipboard: &ClipboardFactory,
+    approver: &dyn Approver,
     tool: &str,
     args: &Value,
 ) -> Result<String> {
@@ -245,6 +247,9 @@ pub(super) fn call(
             }
             if let Some(dir) = args.cwd {
                 request = request.cwd(dir);
+            }
+            if !request.secret_names().is_empty() {
+                approver.approve(&approve::run_reason(&request))?;
             }
             pretty(&run(vault, &request)?)
         }

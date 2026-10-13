@@ -1,10 +1,12 @@
 //! MCP server tests: protocol handling and tools, with a no-leak check on every response.
 
 use std::io::Cursor;
+use std::sync::{Arc, Mutex};
 
+use llm_secret_vault::approve::Approver;
 use llm_secret_vault::capture::Clipboard;
 use llm_secret_vault::mcp::{PROTOCOL_VERSION, Server};
-use llm_secret_vault::{Result, Vault};
+use llm_secret_vault::{Error, ErrorKind, Result, Vault};
 use serde_json::{Value, json};
 
 const SECRET: &str = "re_live_0123456789abcdef";
@@ -340,4 +342,75 @@ fn serve_survives_bad_lines_and_leaks_nothing() {
     assert_eq!(lines[2]["error"]["code"], -32700);
     assert_eq!(lines[3]["id"], 3);
     assert_eq!(lines[4]["id"], 2);
+}
+
+#[derive(Debug, Clone)]
+struct Recording {
+    reasons: Arc<Mutex<Vec<String>>>,
+    allow: bool,
+}
+
+impl Approver for Recording {
+    fn approve(&self, reason: &str) -> Result<()> {
+        self.reasons.lock().unwrap().push(reason.to_owned());
+        if self.allow {
+            Ok(())
+        } else {
+            Err(Error::from_kind(ErrorKind::Denied(
+                "Touch ID approval was denied or cancelled".to_owned(),
+            )))
+        }
+    }
+}
+
+fn approving_server(allow: bool) -> (Server, Arc<Mutex<Vec<String>>>) {
+    let reasons = Arc::new(Mutex::new(Vec::new()));
+    let approver = Recording {
+        reasons: Arc::clone(&reasons),
+        allow,
+    };
+    (server().with_approver(Box::new(approver)), reasons)
+}
+
+#[cfg(unix)]
+#[test]
+fn run_asks_approval_with_command_and_names_only() {
+    let (server, reasons) = approving_server(true);
+    tool(&server, "secret_capture", &json!({"name": "resend"}));
+    let (text, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["true"], "env": {"T": "resend"}}),
+    );
+    assert!(!is_error, "{text}");
+    let reasons = reasons.lock().unwrap();
+    assert_eq!(*reasons, ["run \"true\" with secrets resend"]);
+    assert!(!reasons[0].contains(SECRET));
+}
+
+#[cfg(unix)]
+#[test]
+fn run_denied_approval_does_not_spawn() {
+    let (server, reasons) = approving_server(false);
+    tool(&server, "secret_capture", &json!({"name": "resend"}));
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("marker");
+    let (text, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["touch", marker.to_str().unwrap()], "env": {"T": "resend"}}),
+    );
+    assert!(is_error);
+    assert_eq!(text, "Touch ID approval was denied or cancelled");
+    assert!(!marker.exists());
+    assert_eq!(reasons.lock().unwrap().len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn run_without_secrets_skips_approval() {
+    let (server, reasons) = approving_server(false);
+    let (text, is_error) = tool(&server, "secret_run", &json!({"argv": ["true"]}));
+    assert!(!is_error, "{text}");
+    assert!(reasons.lock().unwrap().is_empty());
 }

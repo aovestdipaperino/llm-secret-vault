@@ -4,6 +4,7 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use llm_secret_vault::approve::{self, Context};
 use llm_secret_vault::capture::{CaptureOptions, SystemClipboard, capture};
 use llm_secret_vault::generate::{Alphabet, GenerateOptions, generate};
 use llm_secret_vault::hook::{Decision, evaluate};
@@ -222,7 +223,8 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Mcp => {
-            let server = Server::with_system_clipboard(Vault::open()?);
+            let server = Server::with_system_clipboard(Vault::open()?)
+                .with_approver(approve::from_env(Context::Mcp)?);
             server
                 .serve(std::io::stdin().lock(), std::io::stdout().lock())
                 .map_err(|e| Error::from_io("MCP transport", &e))?;
@@ -240,6 +242,10 @@ fn run_main(bindings: &[String], argv: Vec<String>) -> Result<ExitCode> {
             ))
         })?;
         request = request.env(var, SecretName::new(name)?);
+    }
+    let approver = approve::from_env(Context::Cli)?;
+    if !request.secret_names().is_empty() {
+        approver.approve(&approve::run_reason(&request))?;
     }
     let output = run(&Vault::open()?, &request)?;
     std::io::stdout().write_all(output.stdout.as_bytes()).ok();

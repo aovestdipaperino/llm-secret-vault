@@ -7,6 +7,7 @@ use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
 
+use crate::approve::{AllowAll, Approver};
 use crate::capture::{Clipboard, SystemClipboard};
 use crate::error::Result;
 use crate::vault::Vault;
@@ -29,6 +30,7 @@ pub type ClipboardFactory = Box<dyn Fn() -> Result<Box<dyn Clipboard>> + Send + 
 pub struct Server {
     vault: Vault,
     clipboard: ClipboardFactory,
+    approver: Box<dyn Approver>,
 }
 
 impl fmt::Debug for Server {
@@ -51,7 +53,18 @@ impl Server {
     /// Creates a server using `clipboard` to reach the clipboard.
     #[must_use]
     pub fn new(vault: Vault, clipboard: ClipboardFactory) -> Self {
-        Self { vault, clipboard }
+        Self {
+            vault,
+            clipboard,
+            approver: Box::new(AllowAll),
+        }
+    }
+
+    /// Sets the approver consulted before secrets are injected.
+    #[must_use]
+    pub fn with_approver(mut self, approver: Box<dyn Approver>) -> Self {
+        self.approver = approver;
+        self
     }
 
     /// Creates a server that uses the system clipboard.
@@ -131,7 +144,13 @@ impl Server {
             .cloned()
             .unwrap_or_else(|| json!({}));
         Ok(
-            match tools::call(&self.vault, &self.clipboard, name, &args) {
+            match tools::call(
+                &self.vault,
+                &self.clipboard,
+                self.approver.as_ref(),
+                name,
+                &args,
+            ) {
                 Ok(text) => tool_result(&text, false),
                 Err(err) => tool_result(&err.to_string(), true),
             },

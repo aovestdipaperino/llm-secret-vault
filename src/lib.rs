@@ -4,6 +4,7 @@
 //! resolved only when a child process is spawned, and the child's output is
 //! redacted before anyone sees it. No operation returns a secret value.
 
+pub mod approve;
 pub mod capture;
 pub mod error;
 pub mod generate;

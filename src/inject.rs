@@ -107,6 +107,16 @@ impl RunRequest {
     pub fn argv(&self) -> &[String] {
         &self.argv
     }
+
+    /// Returns every secret this request would inject, by name.
+    #[must_use]
+    pub fn secret_names(&self) -> BTreeSet<SecretName> {
+        let mut names: BTreeSet<SecretName> = self.env.values().cloned().collect();
+        for arg in &self.argv {
+            names.extend(placeholders(arg).into_iter().map(|(_, name)| name));
+        }
+        names
+    }
 }
 
 /// Result of a [`run`]: exit status and redacted output.
@@ -343,12 +353,8 @@ pub fn run(vault: &Vault, request: &RunRequest) -> Result<RunOutput> {
         )));
     }
 
-    let mut names: BTreeSet<SecretName> = request.env.values().cloned().collect();
-    for arg in &request.argv {
-        names.extend(placeholders(arg).into_iter().map(|(_, name)| name));
-    }
     let mut values = BTreeMap::new();
-    for name in names {
+    for name in request.secret_names() {
         let value = vault.resolve_for_injection(&name)?;
         values.insert(name, value);
     }
