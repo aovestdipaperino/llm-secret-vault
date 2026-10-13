@@ -123,7 +123,7 @@ fn validate(value: &str, options: &CaptureOptions) -> Result<()> {
         )));
     }
     if !options.allow_multiline {
-        if value.contains('\n') {
+        if value.contains(['\n', '\r']) {
             return Err(reject(format!(
                 "clipboard text ({len} characters) spans several lines; pass allow_multiline if that is intended"
             )));
@@ -169,12 +169,11 @@ pub fn capture(
         Ok(Some(now)) => Zeroizing::new(now) == original,
         _ => false,
     };
-    if still_there {
-        clipboard.clear()?;
-    }
+    // The secret is already stored; a failed clear must not hide that.
+    let cleared = still_there && clipboard.clear().is_ok();
     Ok(CaptureReport {
         meta,
-        clipboard_cleared: still_there,
+        clipboard_cleared: cleared,
     })
 }
 
@@ -189,6 +188,7 @@ mod tests {
         swap_after_first_read: Option<String>,
         reads: usize,
         cleared: bool,
+        fail_clear: bool,
     }
 
     impl Clipboard for FakeClipboard {
@@ -204,6 +204,9 @@ mod tests {
         }
 
         fn clear(&mut self) -> Result<()> {
+            if self.fail_clear {
+                return Err(Error::new(ErrorKind::Clipboard("boom".to_owned())));
+            }
             self.text = None;
             self.cleared = true;
             Ok(())
@@ -305,7 +308,51 @@ mod tests {
             allow_multiline: true,
             ..Default::default()
         };
-        assert!(capture(&vault, &mut cb, &name("ssh-key"), &options).is_ok());
+        let report = capture(&vault, &mut cb, &name("ssh-key"), &options).unwrap();
+        assert_eq!(report.meta.len, 46);
+    }
+
+    #[test]
+    fn clear_failure_still_reports_stored_secret() {
+        let vault = Vault::in_memory();
+        let mut cb = clip("first-secret-value");
+        cb.fail_clear = true;
+        let report = capture(&vault, &mut cb, &name("k"), &CaptureOptions::default()).unwrap();
+        assert!(!report.clipboard_cleared);
+        assert!(vault.exists(&name("k")));
+        assert!(vault.list(None).iter().any(|m| m.name == name("k")));
+    }
+
+    #[test]
+    fn oversized_single_line_rejected() {
+        let vault = Vault::in_memory();
+        let mut cb = clip(&"x".repeat(MAX_SINGLE_LINE_LEN + 1));
+        let err = capture(&vault, &mut cb, &name("k"), &CaptureOptions::default()).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidValue(_)));
+        assert!(!vault.exists(&name("k")));
+    }
+
+    #[test]
+    fn carriage_return_counts_as_multiline() {
+        let vault = Vault::in_memory();
+        let mut cb = clip("line-one-secret\rline-two-secret");
+        let err = capture(&vault, &mut cb, &name("k"), &CaptureOptions::default()).unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::InvalidValue(_)));
+    }
+
+    #[test]
+    fn name_exists_leaves_clipboard_alone() {
+        let vault = Vault::in_memory();
+        capture(
+            &vault,
+            &mut clip("first-secret-value"),
+            &name("k"),
+            &CaptureOptions::default(),
+        )
+        .unwrap();
+        let mut cb = clip("second-secret-value");
+        assert!(capture(&vault, &mut cb, &name("k"), &CaptureOptions::default()).is_err());
+        assert!(!cb.cleared);
     }
 
     #[test]
