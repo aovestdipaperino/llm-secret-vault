@@ -210,7 +210,6 @@ impl Vault {
     }
 
     /// Returns a secret's value. Only `inject` may call this.
-    #[allow(dead_code)] // used by inject (Task 5)
     pub(crate) fn resolve(&self, name: &SecretName) -> Result<Zeroizing<String>> {
         self.inner
             .backend

@@ -5,6 +5,7 @@
 //! redacted before anyone sees it. No operation returns a secret value.
 
 pub mod error;
+pub mod inject;
 pub mod name;
 pub mod redact;
 pub mod vault;
