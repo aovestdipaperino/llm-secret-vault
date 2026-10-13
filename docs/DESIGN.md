@@ -42,7 +42,7 @@ A single binary `lsv` (crate `llm-secret-vault`) with three roles:
 
 - `lsv <subcommand>`: CLI for the human.
 - `lsv mcp`: stdio MCP server launched by Claude Code.
-- `lsv hook`: Claude Code `PreToolUse` hook for the `Bash` tool.
+- `lsv hook`: `PreToolUse` hook for the shell tool (Claude Code `Bash`, plank `bash`).
 
 No daemon, no own storage format for values: storage, encryption and locking
 belong to the OS keyring. Alternatives considered: a daemon with thin clients
@@ -80,7 +80,7 @@ nothing for the hook to enforce).
 | `inject` | Parse references, resolve, spawn child, collect output through `redact`, enforce timeout and output cap. | backend, redact |
 | `redact` | Streaming replacement of each value with `«redacted:name»`. Covers raw, base64 (standard and URL-safe, padded and unpadded, plus the base64 prefix of complete 3-byte groups so a secret followed by other bytes in a blob is still caught), percent-encoding (uppercase `%XX`), the JSON string-escaped form of the value, and hex (lower and upper). Correct across read-chunk boundaries; overlapping or touching matches merge into one span. Not covered: base64 of a secret at a non-zero offset inside a larger blob, and deliberate transformations. | none |
 | `mcp` | Hand-written JSON-RPC 2.0 over stdio (initialize, tools/list, tools/call) with serde. | all core modules |
-| `hook` | Parse Claude Code `PreToolUse` JSON, apply deny rules, emit decision JSON. | none |
+| `hook` | Parse `PreToolUse` JSON, apply deny rules; the CLI blocks with exit 2 and the reason on stderr. | none |
 | `cli` | clap subcommands. | all core modules |
 
 Keyring entries use service `llm-secret-vault` and the secret name as account.
@@ -127,6 +127,7 @@ lsv run [VAR=name ...] -- <argv...>
 lsv delete <name>
 lsv mcp                      lsv hook
 lsv setup claude             # prints `claude mcp add` command and hook JSON
+lsv setup plank              # prints ~/.plank/.mcp.json and hooks.json entries
 ```
 
 `lsv run` from the human's shell redacts output too, so pasting terminal
@@ -150,8 +151,9 @@ No display on Linux (no X11/Wayland): error suggesting `lsv import`.
 ## Guard hook
 
 `lsv hook` reads the `PreToolUse` JSON from stdin, inspects
-`tool_input.command` for `Bash`, and returns a deny decision with a
-human-readable reason naming the rule when it matches:
+`tool_input.command` when `tool_name` is `bash` in any case, and blocks by
+exiting 2 with a human-readable reason naming the rule on stderr when it
+matches:
 
 - `lsv run` whose child dumps the environment: `printenv`, `env` with no
   command (options only), bare `set`, `export`, `export -p`. Every `lsv run` in

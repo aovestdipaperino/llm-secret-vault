@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use llm_secret_vault::capture::{CaptureOptions, SystemClipboard, capture};
 use llm_secret_vault::generate::{Alphabet, GenerateOptions, generate};
-use llm_secret_vault::hook::{evaluate, render};
+use llm_secret_vault::hook::{Decision, evaluate};
 use llm_secret_vault::import::import;
 use llm_secret_vault::inject::{RunRequest, run};
 use llm_secret_vault::mcp::Server;
@@ -69,7 +69,7 @@ enum Cmd {
     Delete { name: String },
     /// Serve MCP over stdio (launched by Claude Code).
     Mcp,
-    /// Claude Code `PreToolUse` guard; reads hook JSON on stdin.
+    /// `PreToolUse` guard for Claude Code and plank; reads hook JSON on stdin.
     Hook,
     /// Print setup instructions.
     Setup {
@@ -82,6 +82,8 @@ enum Cmd {
 enum SetupTarget {
     /// Claude Code: MCP registration and guard hook.
     Claude,
+    /// plank: MCP registration and guard hook.
+    Plank,
 }
 
 const SETUP_CLAUDE: &str = r#"1. Register the MCP server:
@@ -105,6 +107,28 @@ const SETUP_CLAUDE: &str = r#"1. Register the MCP server:
    "the NAS root password is in the clipboard, save it as nas-root".
 "#;
 
+const SETUP_PLANK: &str = r#"1. Register the MCP server in ~/.plank/.mcp.json (merge with existing "mcpServers"):
+
+   {
+     "mcpServers": {
+       "llm-secret-vault": { "command": "lsv", "args": ["mcp"] }
+     }
+   }
+
+2. Add the guard hook to ~/.plank/hooks.json (merge with existing events):
+
+   {
+     "PreToolUse": [
+       {
+         "matcher": "bash",
+         "hooks": [{ "type": "command", "command": "lsv hook" }]
+       }
+     ]
+   }
+
+3. Restart plank; /hooks should list the guard.
+"#;
+
 fn main() -> ExitCode {
     match dispatch(Cli::parse().command) {
         Ok(code) => code,
@@ -118,10 +142,14 @@ fn main() -> ExitCode {
 fn dispatch(command: Cmd) -> Result<ExitCode> {
     match command {
         Cmd::Hook => Ok(hook_main()),
-        Cmd::Setup {
-            target: SetupTarget::Claude,
-        } => {
-            print!("{SETUP_CLAUDE}");
+        Cmd::Setup { target } => {
+            print!(
+                "{}",
+                match target {
+                    SetupTarget::Claude => SETUP_CLAUDE,
+                    SetupTarget::Plank => SETUP_PLANK,
+                }
+            );
             Ok(ExitCode::SUCCESS)
         }
         Cmd::List { prefix } => {
@@ -235,15 +263,19 @@ fn hook_main() -> ExitCode {
         eprintln!("lsv hook: warning: could not read stdin: {e}");
         return ExitCode::SUCCESS;
     }
+    // Exit 2 with the reason on stderr is the blocking protocol shared by
+    // Claude Code and plank; both show the reason to the model.
     match evaluate(&input) {
-        Ok(decision) => {
-            if let Some(json) = render(&decision) {
-                println!("{json}");
-            }
+        Ok(Decision::Allow) => ExitCode::SUCCESS,
+        Ok(Decision::Deny(reason)) => {
+            eprintln!("llm-secret-vault: {reason}");
+            ExitCode::from(2)
         }
-        Err(e) => eprintln!("lsv hook: warning: {e}; allowing the command"),
+        Err(e) => {
+            eprintln!("lsv hook: warning: {e}; allowing the command");
+            ExitCode::SUCCESS
+        }
     }
-    ExitCode::SUCCESS
 }
 
 fn usage(why: String) -> Error {

@@ -1,11 +1,11 @@
-//! Claude Code `PreToolUse` guard that blocks commands likely to print secrets.
+//! `PreToolUse` guard (Claude Code, plank) that blocks commands likely to print secrets.
 //!
 //! This is a heuristic safety net against accidents, not a sandbox.
 
 use std::sync::LazyLock;
 
 use regex::Regex;
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::error::{Error, ErrorKind, Result};
 
@@ -177,43 +177,30 @@ pub fn check_command(command: &str) -> Decision {
     Decision::Allow
 }
 
-/// Evaluates a Claude Code `PreToolUse` hook payload.
+/// Evaluates a `PreToolUse` hook payload.
 ///
-/// Tools other than `Bash` are always allowed.
+/// The shell tool is matched case-insensitively (`Bash` in Claude Code,
+/// `bash` in plank); other tools are always allowed.
 ///
 /// # Errors
 ///
-/// Returns [`ErrorKind::Usage`] if `input` is not valid hook JSON or a `Bash`
+/// Returns [`ErrorKind::Usage`] if `input` is not valid hook JSON or a shell
 /// payload lacks `tool_input.command`. Callers should then allow the command
 /// and warn, so a hook bug cannot wedge the session.
 pub fn evaluate(input: &str) -> Result<Decision> {
     let usage = |why: String| Error::new(ErrorKind::Usage(why));
     let value: Value = serde_json::from_str(input)
         .map_err(|e| usage(format!("could not parse hook input: {e}")))?;
-    if value.get("tool_name").and_then(Value::as_str) != Some("Bash") {
+    let is_shell = value
+        .get("tool_name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| name.eq_ignore_ascii_case("bash"));
+    if !is_shell {
         return Ok(Decision::Allow);
     }
     let command = value
         .pointer("/tool_input/command")
         .and_then(Value::as_str)
-        .ok_or_else(|| usage("Bash hook input has no tool_input.command".to_owned()))?;
+        .ok_or_else(|| usage("shell hook input has no tool_input.command".to_owned()))?;
     Ok(check_command(command))
-}
-
-/// Renders a decision as Claude Code hook output; `None` means allow silently.
-#[must_use]
-pub fn render(decision: &Decision) -> Option<String> {
-    match decision {
-        Decision::Allow => None,
-        Decision::Deny(reason) => Some(
-            json!({
-                "hookSpecificOutput": {
-                    "hookEventName": "PreToolUse",
-                    "permissionDecision": "deny",
-                    "permissionDecisionReason": format!("llm-secret-vault: {reason}"),
-                }
-            })
-            .to_string(),
-        ),
-    }
 }

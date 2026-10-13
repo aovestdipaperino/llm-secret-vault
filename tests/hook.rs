@@ -1,6 +1,6 @@
 //! Guard hook rule table.
 
-use llm_secret_vault::hook::{Decision, check_command, evaluate, render};
+use llm_secret_vault::hook::{Decision, check_command, evaluate};
 
 const DENY: &[&str] = &[
     "security find-generic-password -s foo -w",
@@ -78,19 +78,10 @@ fn allows_normal_commands() {
 fn evaluates_hook_json() {
     let deny = r#"{"tool_name":"Bash","tool_input":{"command":"lsv run X=a -- printenv"}}"#;
     assert!(matches!(evaluate(deny).unwrap(), Decision::Deny(_)));
+    let plank = r#"{"tool_name":"bash","tool_input":{"command":"lsv run X=a -- printenv"}}"#;
+    assert!(matches!(evaluate(plank).unwrap(), Decision::Deny(_)));
     let other_tool = r#"{"tool_name":"Read","tool_input":{"file_path":"/etc/hosts"}}"#;
     assert_eq!(evaluate(other_tool).unwrap(), Decision::Allow);
     assert!(evaluate("not json").is_err());
     assert!(evaluate(r#"{"tool_name":"Bash","tool_input":{}}"#).is_err());
-}
-
-#[test]
-fn renders_deny_for_claude_code() {
-    assert!(render(&Decision::Allow).is_none());
-    let json: serde_json::Value =
-        serde_json::from_str(&render(&Decision::Deny("because".into())).unwrap()).unwrap();
-    let out = &json["hookSpecificOutput"];
-    assert_eq!(out["hookEventName"], "PreToolUse");
-    assert_eq!(out["permissionDecision"], "deny");
-    assert_eq!(out["permissionDecisionReason"], "llm-secret-vault: because");
 }

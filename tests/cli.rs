@@ -38,11 +38,12 @@ fn help_lists_subcommands() {
 #[test]
 fn hook_denies_and_allows() {
     let out = hook(r#"{"tool_name":"Bash","tool_input":{"command":"lsv run X=a -- printenv"}}"#);
-    assert!(out.status.success());
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(out.stdout, b"");
     assert!(
-        String::from_utf8(out.stdout)
+        String::from_utf8(out.stderr)
             .unwrap()
-            .contains("\"permissionDecision\":\"deny\"")
+            .starts_with("llm-secret-vault: ")
     );
 
     let out = hook(r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#);
@@ -64,6 +65,14 @@ fn setup_claude_prints_instructions() {
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.contains("claude mcp add --scope user llm-secret-vault -- lsv mcp"));
     assert!(text.contains("\"command\": \"lsv hook\""));
+}
+
+#[test]
+fn setup_plank_prints_instructions() {
+    let out = lsv().args(["setup", "plank"]).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("~/.plank/.mcp.json"));
+    assert!(text.contains("\"matcher\": \"bash\""));
 }
 
 #[test]

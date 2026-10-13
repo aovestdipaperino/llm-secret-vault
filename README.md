@@ -34,6 +34,7 @@ tool.
 ```bash
 cargo install --git https://github.com/aovestdipaperino/llm-secret-vault   # installs the `lsv` binary
 lsv setup claude                    # prints the MCP and hook setup for Claude Code
+lsv setup plank                     # same for plank
 ```
 
 The crate is not published on crates.io yet, hence the git install. On Linux,
@@ -93,7 +94,9 @@ stderr when it matters.
 
 ## The guard hook
 
-`lsv hook` is a Claude Code `PreToolUse` hook for the Bash tool only. The argv
+`lsv hook` is a `PreToolUse` hook for the shell tool only (`Bash` in Claude
+Code, `bash` in plank). It blocks by exiting 2 with the reason on stderr,
+which both hosts show to the model. The argv
 of an MCP `secret_run` call is not checked by the hook, although its output is
 still redacted. The hook analyses every
 `lsv run` in a command line (including `lsv` invoked by path) and blocks
