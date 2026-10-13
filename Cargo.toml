@@ -1,0 +1,46 @@
+[package]
+name = "llm-secret-vault"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["Enzo Lombardi <enzinol@gmail.com>"]
+description = "Let LLM agents capture, generate and use OS-keyring secrets without ever reading them"
+license = "MIT"
+repository = "https://github.com/aovestdipaperino/llm-secret-vault"
+homepage = "https://github.com/aovestdipaperino/llm-secret-vault"
+readme = "README.md"
+keywords = ["mcp", "secrets", "keyring", "llm", "claude"]
+categories = ["command-line-utilities", "authentication"]
+
+[[bin]]
+name = "lsv"
+path = "src/main.rs"
+
+[dependencies]
+arboard = "3"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+getrandom = "0.3"
+hex = "0.4"
+hmac = "0.12"
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
+regex = "1"
+rpassword = "7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+zeroize = "1"
+
+[dev-dependencies]
+proptest = "1"
+tempfile = "3"
+
+[lints.rust]
+missing_debug_implementations = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
