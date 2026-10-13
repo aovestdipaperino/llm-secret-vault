@@ -210,7 +210,7 @@ impl Vault {
     }
 
     /// Returns a secret's value. Only `inject` may call this.
-    pub(crate) fn resolve(&self, name: &SecretName) -> Result<Zeroizing<String>> {
+    pub(crate) fn resolve_for_injection(&self, name: &SecretName) -> Result<Zeroizing<String>> {
         self.inner
             .backend
             .resolve(name.as_str())?
@@ -241,7 +241,10 @@ mod tests {
         assert_eq!(vault.list(Some("nas")), vec![meta]);
         assert!(vault.list(Some("hf")).is_empty());
         assert_eq!(
-            vault.resolve(&name("nas-root")).unwrap().as_str(),
+            vault
+                .resolve_for_injection(&name("nas-root"))
+                .unwrap()
+                .as_str(),
             "hunter2-long"
         );
     }
@@ -263,7 +266,10 @@ mod tests {
         assert_eq!(rotated.created, first.created);
         assert!(rotated.rotated.is_some());
         assert_ne!(rotated.fingerprint, first.fingerprint);
-        assert_eq!(vault.resolve(&name("k")).unwrap().as_str(), "second-value");
+        assert_eq!(
+            vault.resolve_for_injection(&name("k")).unwrap().as_str(),
+            "second-value"
+        );
     }
 
     #[test]
@@ -291,7 +297,10 @@ mod tests {
             ErrorKind::UnknownName(_)
         ));
         assert!(matches!(
-            vault.resolve(&name("nope")).unwrap_err().kind(),
+            vault
+                .resolve_for_injection(&name("nope"))
+                .unwrap_err()
+                .kind(),
             ErrorKind::UnknownName(_)
         ));
         vault

@@ -155,5 +155,55 @@ fn periodic_secret_flood_is_bounded_and_redacted() {
     assert!(!out.timed_out);
     assert!(!out.stdout.contains("abab"));
     assert!(out.stdout.len() <= 100);
+    assert!(!out.stdout.contains("abab"));
     assert!(start.elapsed() < Duration::from_secs(20));
+}
+
+#[test]
+fn timeout_covers_background_process_holding_the_pipe() {
+    let start = Instant::now();
+    let req =
+        RunRequest::new(["sh", "-c", "sleep 30 & echo hi"]).timeout(Duration::from_millis(500));
+    let out = run(&vault(), &req).unwrap();
+    assert!(out.timed_out);
+    assert!(out.stdout.contains("hi"), "{:?}", out.stdout);
+    assert!(start.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn placeholder_in_program_is_resolved() {
+    let vault = Vault::in_memory();
+    let tool = SecretName::new("tool").unwrap();
+    vault
+        .store(&tool, "/bin/echo", Source::Clipboard, false)
+        .unwrap();
+    let out = run(&vault, &RunRequest::new(["{{tool}}", "hi"])).unwrap();
+    assert_eq!(out.stdout, "hi\n");
+}
+
+#[test]
+fn unknown_placeholder_in_program_fails_before_spawning() {
+    let err = run(&vault(), &RunRequest::new(["{{missing}}"])).unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::UnknownName(_)));
+}
+
+#[test]
+fn spawn_error_for_program_placeholder_hides_resolved_value() {
+    let vault = Vault::in_memory();
+    let tool = SecretName::new("tool").unwrap();
+    vault
+        .store(&tool, "/no/such/secret-path", Source::Clipboard, false)
+        .unwrap();
+    let err = run(&vault, &RunRequest::new(["{{tool}}"])).unwrap_err();
+    assert!(matches!(err.kind(), ErrorKind::Spawn(_)));
+    assert!(err.to_string().contains("{{tool}}"));
+    assert!(!err.to_string().contains("secret-path"));
+}
+
+#[test]
+fn truncation_cuts_on_a_char_boundary() {
+    let req = RunRequest::new(["sh", "-c", "printf 'aé€'"]).max_output_bytes(2);
+    let out = run(&vault(), &req).unwrap();
+    assert_eq!(out.stdout, "a");
+    assert!(out.truncated);
 }

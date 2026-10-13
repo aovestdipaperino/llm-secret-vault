@@ -4,7 +4,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,12 +19,15 @@ use crate::vault::Vault;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 const READ_CHUNK: usize = 8192;
+const KILL_GRACE: Duration = Duration::from_secs(1);
 const RAW_SLACK: usize = 64 * 1024;
 
 /// A command to run with secrets injected.
 ///
 /// Secrets reach the child as environment variables (via [`RunRequest::env`])
-/// or through `{{name}}` placeholders in any argument after the program.
+/// or through `{{name}}` placeholders in any element of the command line,
+/// including the program itself. Any `{{word}}` whose inner text (trimmed) is
+/// a valid secret name is treated as a reference; there is no escape syntax.
 ///
 /// # Examples
 ///
@@ -76,7 +80,11 @@ impl RunRequest {
         self
     }
 
-    /// Kills the child (and its process group on Unix) after `limit`.
+    /// Kills the child and its whole process group (Unix) after `limit`.
+    ///
+    /// Background processes the command leaves in its process group are killed
+    /// at the timeout, and [`run`] waits for them (and for the output pipes to
+    /// close) for up to `limit`.
     #[must_use]
     pub fn timeout(mut self, limit: Duration) -> Self {
         self.timeout = Some(limit);
@@ -84,6 +92,10 @@ impl RunRequest {
     }
 
     /// Keeps at most `bytes` of redacted output per stream.
+    ///
+    /// Excess output is discarded, not blocked on. Without a
+    /// [`timeout`](Self::timeout), a command that never exits still never
+    /// returns.
     #[must_use]
     pub fn max_output_bytes(mut self, bytes: usize) -> Self {
         self.max_output_bytes = Some(bytes);
@@ -191,7 +203,10 @@ fn pump(mut reader: impl Read, mut redactor: Redactor, cap: Option<usize>) -> (V
             Ok(0) => break,
             Ok(n) => n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            Err(_) => {
+                truncated = true;
+                break;
+            }
         };
         if truncated {
             continue;
@@ -208,6 +223,14 @@ fn pump(mut reader: impl Read, mut redactor: Redactor, cap: Option<usize>) -> (V
         let clean = redactor.finish();
         truncated = append_capped(&mut collected, &clean, cap);
     }
+    if truncated {
+        // Cut on a character boundary, not in the middle of a UTF-8 sequence.
+        if let Err(e) = std::str::from_utf8(&collected) {
+            if e.error_len().is_none() {
+                collected.truncate(e.valid_up_to());
+            }
+        }
+    }
     (collected, truncated)
 }
 
@@ -223,6 +246,75 @@ fn kill_tree(child: &mut Child) {
     let _ = child.kill();
 }
 
+struct Waited {
+    status: Option<ExitStatus>,
+    out: Option<(Vec<u8>, bool)>,
+    err: Option<(Vec<u8>, bool)>,
+    timed_out: bool,
+}
+
+type Chunk = (Stream, (Vec<u8>, bool));
+
+/// Waits for the leader and both readers, enforcing the timeout over all three.
+fn supervise(
+    child: &mut Child,
+    rx: &mpsc::Receiver<Chunk>,
+    timeout: Option<Duration>,
+    template: &str,
+) -> Result<Waited> {
+    // The deadline covers the leader and both output pipes, so background
+    // processes holding a pipe open cannot stall us past the timeout.
+    let deadline = timeout.and_then(|limit| Instant::now().checked_add(limit));
+    let mut timed_out = false;
+    let mut status = None;
+    let mut out: Option<(Vec<u8>, bool)> = None;
+    let mut err: Option<(Vec<u8>, bool)> = None;
+    let mut give_up_at: Option<Instant> = None;
+    loop {
+        while let Ok((stream, result)) = rx.try_recv() {
+            match stream {
+                Stream::Out => out = Some(result),
+                Stream::Err => err = Some(result),
+            }
+        }
+        if status.is_none() {
+            match child.try_wait() {
+                Ok(s) => status = s,
+                Err(e) => {
+                    kill_tree(child);
+                    return Err(Error::new(ErrorKind::Spawn(format!(
+                        "waiting for {template}: {e}"
+                    ))));
+                }
+            }
+        }
+        if status.is_some() && out.is_some() && err.is_some() {
+            break;
+        }
+        let now = Instant::now();
+        if let Some(give_up) = give_up_at {
+            if now >= give_up {
+                break;
+            }
+        } else if deadline.is_some_and(|d| now >= d) {
+            timed_out = true;
+            kill_tree(child);
+            give_up_at = Some(now + KILL_GRACE);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    if status.is_none() {
+        // Killed but not yet reaped within the grace period.
+        status = child.try_wait().ok().flatten();
+    }
+    Ok(Waited {
+        status,
+        out,
+        err,
+        timed_out,
+    })
+}
+
 /// Runs `request` with its secrets injected and returns redacted output.
 ///
 /// # Errors
@@ -230,13 +322,14 @@ fn kill_tree(child: &mut Child) {
 /// Returns [`ErrorKind::Usage`] for an empty argv or an invalid environment
 /// variable name, [`ErrorKind::UnknownName`] if a referenced secret does not
 /// exist (nothing is spawned), [`ErrorKind::Keyring`] if the keyring fails,
-/// and [`ErrorKind::Spawn`] if the program cannot be started or awaited.
+/// and [`ErrorKind::Spawn`] if the program cannot be started or awaited. Spawn
+/// errors name the program as given, before placeholder substitution.
 ///
 /// # Panics
 ///
-/// Panics only if an internal output-reader thread panics, which is a bug.
+/// Panics only if the child's piped streams are missing, which is a bug.
 pub fn run(vault: &Vault, request: &RunRequest) -> Result<RunOutput> {
-    let program = request
+    let template = request
         .argv
         .first()
         .ok_or_else(|| usage("argv must contain at least the program to run"))?;
@@ -247,22 +340,23 @@ pub fn run(vault: &Vault, request: &RunRequest) -> Result<RunOutput> {
     }
 
     let mut names: BTreeSet<SecretName> = request.env.values().cloned().collect();
-    for arg in &request.argv[1..] {
+    for arg in &request.argv {
         names.extend(placeholders(arg).into_iter().map(|(_, name)| name));
     }
     let mut values = BTreeMap::new();
     for name in names {
-        let value = vault.resolve(&name)?;
+        let value = vault.resolve_for_injection(&name)?;
         values.insert(name, value);
     }
 
-    let args: Vec<Zeroizing<String>> = request.argv[1..]
+    let argv: Vec<Zeroizing<String>> = request
+        .argv
         .iter()
         .map(|a| substitute(a, &values))
         .collect();
-    let mut command = Command::new(program);
+    let mut command = Command::new(argv[0].as_str());
     command
-        .args(args.iter().map(|a| a.as_str()))
+        .args(argv[1..].iter().map(|a| a.as_str()))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -277,50 +371,49 @@ pub fn run(vault: &Vault, request: &RunRequest) -> Result<RunOutput> {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
+    // Errors name the unsubstituted template, never the resolved value.
     let mut child = command
         .spawn()
-        .map_err(|e| Error::new(ErrorKind::Spawn(format!("{program}: {e}"))))?;
+        .map_err(|e| Error::new(ErrorKind::Spawn(format!("{template}: {e}"))))?;
 
     let redactor = Redactor::new(values.iter().map(|(n, v)| (n.as_str(), v.as_str())));
     let cap = request.max_output_bytes;
     let stdout = child.stdout.take().expect("stdout is piped");
     let stderr = child.stderr.take().expect("stderr is piped");
-    let out_reader = {
-        let redactor = redactor.clone();
-        thread::spawn(move || pump(stdout, redactor, cap))
-    };
-    let err_reader = thread::spawn(move || pump(stderr, redactor, cap));
-
-    let mut timed_out = false;
-    let status = match request.timeout {
-        None => child.wait(),
-        Some(limit) => {
-            let deadline = Instant::now() + limit;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break Ok(status),
-                    Ok(None) if Instant::now() >= deadline => {
-                        timed_out = true;
-                        kill_tree(&mut child);
-                        break child.wait();
-                    }
-                    Ok(None) => thread::sleep(POLL_INTERVAL),
-                    Err(e) => break Err(e),
-                }
-            }
-        }
+    let (tx, rx) = mpsc::channel();
+    {
+        let (tx, redactor) = (tx.clone(), redactor.clone());
+        thread::spawn(move || {
+            let _ = tx.send((Stream::Out, pump(stdout, redactor, cap)));
+        });
     }
-    .map_err(|e| Error::new(ErrorKind::Spawn(format!("waiting for {program}: {e}"))))?;
+    thread::spawn(move || {
+        let _ = tx.send((Stream::Err, pump(stderr, redactor, cap)));
+    });
 
-    let (stdout, out_truncated) = out_reader.join().expect("stdout reader panicked");
-    let (stderr, err_truncated) = err_reader.join().expect("stderr reader panicked");
+    let Waited {
+        status,
+        out,
+        err,
+        timed_out,
+    } = supervise(&mut child, &rx, request.timeout, template)?;
+
+    // A stream whose reader did not return is reported as truncated and empty.
+    let (stdout, out_truncated) = out.unwrap_or((Vec::new(), true));
+    let (stderr, err_truncated) = err.unwrap_or((Vec::new(), true));
     Ok(RunOutput {
-        exit_code: status.code(),
+        exit_code: status.and_then(|s| s.code()),
         stdout: String::from_utf8_lossy(&stdout).into_owned(),
         stderr: String::from_utf8_lossy(&stderr).into_owned(),
         truncated: out_truncated || err_truncated,
         timed_out,
     })
+}
+
+#[derive(Clone, Copy)]
+enum Stream {
+    Out,
+    Err,
 }
 
 #[cfg(test)]
