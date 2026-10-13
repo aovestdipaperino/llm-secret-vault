@@ -3,10 +3,7 @@
 mod keyring_store;
 mod memory;
 
-// used from Task 3 (vault)
-#[allow(unused_imports)]
 pub(crate) use keyring_store::KeyringBackend;
-#[allow(unused_imports)]
 pub(crate) use memory::MemoryBackend;
 
 use zeroize::Zeroizing;

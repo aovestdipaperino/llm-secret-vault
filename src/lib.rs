@@ -6,10 +6,12 @@
 
 pub mod error;
 pub mod name;
+pub mod vault;
 
-// used from Task 3 (vault)
-#[allow(dead_code)]
 mod backend;
+mod fingerprint;
+mod index;
 
 pub use error::{Error, ErrorKind, Result};
 pub use name::SecretName;
+pub use vault::{Meta, Source, Vault};
