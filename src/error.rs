@@ -90,3 +90,17 @@ impl fmt::Display for Error {
 }
 
 impl std::error::Error for Error {}
+
+impl Error {
+    /// Creates an error of the given kind.
+    #[must_use]
+    pub fn from_kind(kind: ErrorKind) -> Self {
+        Self::new(kind)
+    }
+
+    /// Wraps an I/O error that occurred during `context`.
+    #[must_use]
+    pub fn from_io(context: &str, err: &std::io::Error) -> Self {
+        Self::new(ErrorKind::Spawn(format!("{context}: {err}")))
+    }
+}
