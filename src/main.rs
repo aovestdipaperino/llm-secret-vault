@@ -60,6 +60,10 @@ enum Cmd {
     },
     /// Run a command with secrets injected: lsv run VAR=name ... -- program args.
     Run {
+        /// Skip Touch ID approval for this run (for your own terminal only;
+        /// the guard hook refuses it from an agent).
+        #[arg(long)]
+        no_touch: bool,
         /// VAR=secret-name bindings.
         bindings: Vec<String>,
         /// Program and arguments; {{name}} placeholders are expanded.
@@ -106,6 +110,12 @@ const SETUP_CLAUDE: &str = r#"1. Register the MCP server:
 
 3. Next time a secret is on your clipboard, tell Claude its name, e.g.
    "the NAS root password is in the clipboard, save it as nas-root".
+
+On macOS every secret use asks for Touch ID by default. The MCP server
+reuses an approval for the same secrets for LSV_TOUCH_ID_TTL seconds
+(default 300); each `lsv run` from your terminal asks every time unless you
+pass `--no-touch`. The guard hook stops Claude from using `--no-touch` or
+changing LSV_TOUCH_ID, so this protection assumes the hook is installed.
 "#;
 
 const SETUP_PLANK: &str = r#"1. Register the MCP server in ~/.plank/.mcp.json (merge with existing "mcpServers"):
@@ -128,6 +138,12 @@ const SETUP_PLANK: &str = r#"1. Register the MCP server in ~/.plank/.mcp.json (m
    }
 
 3. Restart plank; /hooks should list the guard.
+
+On macOS every secret use asks for Touch ID by default. The MCP server
+reuses an approval for the same secrets for LSV_TOUCH_ID_TTL seconds
+(default 300); each `lsv run` from your terminal asks every time unless you
+pass `--no-touch`. The guard hook stops plank from using `--no-touch` or
+changing LSV_TOUCH_ID, so this protection assumes the hook is installed.
 "#;
 
 fn main() -> ExitCode {
@@ -215,7 +231,11 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
             println!("stored {name}: {} chars, fp {}", meta.len, meta.fingerprint);
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Run { bindings, argv } => run_main(&bindings, argv),
+        Cmd::Run {
+            no_touch,
+            bindings,
+            argv,
+        } => run_main(&bindings, argv, no_touch),
         Cmd::Delete { name } => {
             let name = SecretName::new(name)?;
             Vault::open()?.delete(&name)?;
@@ -233,7 +253,7 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
     }
 }
 
-fn run_main(bindings: &[String], argv: Vec<String>) -> Result<ExitCode> {
+fn run_main(bindings: &[String], argv: Vec<String>, no_touch: bool) -> Result<ExitCode> {
     let mut request = RunRequest::new(argv);
     for binding in bindings {
         let (var, name) = binding.split_once('=').ok_or_else(|| {
@@ -243,6 +263,7 @@ fn run_main(bindings: &[String], argv: Vec<String>) -> Result<ExitCode> {
         })?;
         request = request.env(var, SecretName::new(name)?);
     }
+    request.validate()?;
     let vault = Vault::open()?;
     let names = request.secret_names();
     if !names.is_empty() {
@@ -250,7 +271,9 @@ fn run_main(bindings: &[String], argv: Vec<String>) -> Result<ExitCode> {
         for name in &names {
             vault.info(name)?;
         }
-        approve::from_env(Context::Cli)?.approve(&approve::run_reason(&request))?;
+        if !no_touch {
+            approve::from_env(Context::Cli)?.approve(&approve::run_reason(&request), &names)?;
+        }
     }
     let output = run(&vault, &request)?;
     std::io::stdout().write_all(output.stdout.as_bytes()).ok();

@@ -99,3 +99,24 @@ fn malformed_binding_is_rejected_before_opening_vault() {
             .contains("VAR=secret-name")
     );
 }
+
+#[test]
+fn run_help_lists_no_touch() {
+    let out = lsv().args(["run", "--help"]).output().unwrap();
+    let text = String::from_utf8(out.stdout).unwrap();
+    assert!(text.contains("--no-touch"), "{text}");
+}
+
+#[test]
+fn bad_env_var_is_rejected_before_opening_vault() {
+    let out = lsv()
+        .args(["run", "1BAD=resend", "--", "true"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(
+        String::from_utf8(out.stderr)
+            .unwrap()
+            .contains("not a valid environment variable name")
+    );
+}

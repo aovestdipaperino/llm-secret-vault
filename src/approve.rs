@@ -3,13 +3,14 @@
 //! Approvers never see secret values; the reason shown to the user names the
 //! command and the secrets by name only.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use crate::error::{Error, ErrorKind, Result};
 use crate::inject::RunRequest;
+use crate::name::SecretName;
 
 const DEFAULT_TTL_S: u64 = 300;
 const MAX_TTL_S: u64 = 3600;
@@ -17,12 +18,12 @@ const REASON_CMD_CHARS: usize = 80;
 
 /// Asks the user to approve injecting secrets into a command.
 pub trait Approver: Send + Sync + fmt::Debug {
-    /// Asks for approval; `reason` is shown to the user.
+    /// Asks for approval to inject `secrets`; `reason` is shown to the user.
     ///
     /// # Errors
     ///
     /// Returns an error if approval is denied, cancelled or unavailable.
-    fn approve(&self, reason: &str) -> Result<()>;
+    fn approve(&self, reason: &str, secrets: &BTreeSet<SecretName>) -> Result<()>;
 }
 
 /// An approver that approves everything.
@@ -30,42 +31,49 @@ pub trait Approver: Send + Sync + fmt::Debug {
 pub struct AllowAll;
 
 impl Approver for AllowAll {
-    fn approve(&self, _reason: &str) -> Result<()> {
+    fn approve(&self, _reason: &str, _secrets: &BTreeSet<SecretName>) -> Result<()> {
         Ok(())
     }
 }
 
-/// Remembers a successful approval for a while so prompts are not repeated.
+/// Remembers successful approvals per secret name for a while, so prompts
+/// are not repeated for secrets the user already approved.
 #[derive(Debug)]
 pub struct Cached<A> {
     inner: A,
     ttl: Duration,
-    approved_at: Mutex<Option<Instant>>,
+    approved_at: Mutex<BTreeMap<SecretName, Instant>>,
 }
 
 impl<A> Cached<A> {
-    /// Wraps `inner`, skipping it for `ttl` after each success.
+    /// Wraps `inner`, skipping it when every requested secret was approved
+    /// within the last `ttl`.
     #[must_use]
     pub fn new(inner: A, ttl: Duration) -> Self {
         Self {
             inner,
             ttl,
-            approved_at: Mutex::new(None),
+            approved_at: Mutex::new(BTreeMap::new()),
         }
     }
 }
 
 impl<A: Approver> Approver for Cached<A> {
-    fn approve(&self, reason: &str) -> Result<()> {
-        let mut last = self
+    fn approve(&self, reason: &str, secrets: &BTreeSet<SecretName>) -> Result<()> {
+        let mut approved = self
             .approved_at
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(*last, Some(at) if at.elapsed() < self.ttl) {
+        let fresh =
+            |name: &SecretName| approved.get(name).is_some_and(|at| at.elapsed() < self.ttl);
+        if secrets.iter().all(fresh) {
             return Ok(());
         }
-        self.inner.approve(reason)?;
-        *last = Some(Instant::now());
+        self.inner.approve(reason, secrets)?;
+        let now = Instant::now();
+        for name in secrets {
+            approved.insert(name.clone(), now);
+        }
         Ok(())
     }
 }
@@ -95,14 +103,14 @@ fn usage(message: String) -> Error {
 }
 
 impl Mode {
-    /// Parses the `LSV_TOUCH_ID` value; unset means [`Mode::Mcp`].
+    /// Parses the `LSV_TOUCH_ID` value; unset means [`Mode::All`].
     ///
     /// # Errors
     ///
     /// Returns a usage error for values other than `off`, `mcp` or `all`.
     pub fn parse(value: Option<&str>) -> Result<Self> {
         let Some(value) = value else {
-            return Ok(Self::Mcp);
+            return Ok(Self::All);
         };
         match value.to_ascii_lowercase().as_str() {
             "off" => Ok(Self::Off),
@@ -175,7 +183,7 @@ pub struct TouchId;
 
 #[cfg(target_os = "macos")]
 impl Approver for TouchId {
-    fn approve(&self, reason: &str) -> Result<()> {
+    fn approve(&self, reason: &str, _secrets: &BTreeSet<SecretName>) -> Result<()> {
         if evaluate_device_owner(reason) {
             Ok(())
         } else {
@@ -241,7 +249,13 @@ fn evaluate_device_owner(reason: &str) -> bool {
 /// Describes `request` for an approval prompt, naming secrets but never values.
 #[must_use]
 pub fn run_reason(request: &RunRequest) -> String {
-    let joined = request.argv().join(" ");
+    // Collapse whitespace runs so padding cannot push the tail out of view.
+    let joined = request
+        .argv()
+        .iter()
+        .flat_map(|arg| arg.split_whitespace())
+        .collect::<Vec<_>>()
+        .join(" ");
     let command = if joined.chars().count() > REASON_CMD_CHARS {
         let end = joined
             .char_indices()
@@ -251,12 +265,11 @@ pub fn run_reason(request: &RunRequest) -> String {
     } else {
         joined
     };
-    let names: BTreeSet<String> = request
+    let names: Vec<String> = request
         .secret_names()
         .iter()
         .map(ToString::to_string)
         .collect();
-    let names: Vec<String> = names.into_iter().collect();
     format!("run \"{command}\" with secrets {}", names.join(", "))
 }
 
@@ -265,7 +278,6 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::name::SecretName;
 
     #[derive(Debug, Default)]
     struct Counting {
@@ -274,7 +286,7 @@ mod tests {
     }
 
     impl Approver for &Counting {
-        fn approve(&self, _reason: &str) -> Result<()> {
+        fn approve(&self, _reason: &str, _secrets: &BTreeSet<SecretName>) -> Result<()> {
             self.asked.fetch_add(1, Ordering::SeqCst);
             if self.fail {
                 Err(Error::from_kind(ErrorKind::Denied("no".to_owned())))
@@ -284,10 +296,32 @@ mod tests {
         }
     }
 
+    fn names(list: &[&str]) -> BTreeSet<SecretName> {
+        list.iter().map(|n| SecretName::new(*n).unwrap()).collect()
+    }
+
     fn asks(counting: &Counting, ttl: Duration) -> (usize, usize) {
         let cached = Cached::new(counting, ttl);
-        let oks = (0..3).filter(|_| cached.approve("r").is_ok()).count();
+        let oks = (0..3)
+            .filter(|_| cached.approve("r", &names(&["a"])).is_ok())
+            .count();
         (oks, counting.asked.load(Ordering::SeqCst))
+    }
+
+    #[test]
+    fn cache_is_keyed_by_secret_names() {
+        let counting = Counting::default();
+        let cached = Cached::new(&counting, Duration::from_secs(60));
+        cached.approve("r", &names(&["a"])).unwrap();
+        assert_eq!(counting.asked.load(Ordering::SeqCst), 1);
+        cached.approve("r", &names(&["a", "b"])).unwrap();
+        assert_eq!(counting.asked.load(Ordering::SeqCst), 2);
+        cached.approve("r", &names(&["a"])).unwrap();
+        cached.approve("r", &names(&["b"])).unwrap();
+        cached.approve("r", &names(&["a", "b"])).unwrap();
+        assert_eq!(counting.asked.load(Ordering::SeqCst), 2);
+        cached.approve("r", &names(&["c"])).unwrap();
+        assert_eq!(counting.asked.load(Ordering::SeqCst), 3);
     }
 
     #[test]
@@ -311,7 +345,7 @@ mod tests {
 
     #[test]
     fn parses_mode() {
-        assert_eq!(Mode::parse(None).unwrap(), Mode::Mcp);
+        assert_eq!(Mode::parse(None).unwrap(), Mode::All);
         assert_eq!(Mode::parse(Some("OFF")).unwrap(), Mode::Off);
         assert_eq!(Mode::parse(Some("mcp")).unwrap(), Mode::Mcp);
         assert_eq!(Mode::parse(Some("All")).unwrap(), Mode::All);
@@ -355,7 +389,17 @@ mod tests {
     #[test]
     #[ignore = "shows a real Touch ID prompt; run by hand"]
     fn touch_id_prompt() {
-        TouchId.approve("test llm-secret-vault Touch ID").unwrap();
+        TouchId
+            .approve("test llm-secret-vault Touch ID", &BTreeSet::new())
+            .unwrap();
+    }
+
+    #[test]
+    fn reason_collapses_whitespace_before_truncating() {
+        let padded = format!("x{}y", " ".repeat(200));
+        let request = RunRequest::new(["sh".to_owned(), "-c".to_owned(), padded])
+            .env("T", SecretName::new("tok").unwrap());
+        assert_eq!(run_reason(&request), "run \"sh -c x y\" with secrets tok");
     }
 
     #[test]

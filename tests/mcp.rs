@@ -1,12 +1,13 @@
 //! MCP server tests: protocol handling and tools, with a no-leak check on every response.
 
+use std::collections::BTreeSet;
 use std::io::Cursor;
 use std::sync::{Arc, Mutex};
 
 use llm_secret_vault::approve::Approver;
 use llm_secret_vault::capture::Clipboard;
 use llm_secret_vault::mcp::{PROTOCOL_VERSION, Server};
-use llm_secret_vault::{Error, ErrorKind, Result, Vault};
+use llm_secret_vault::{Error, ErrorKind, Result, SecretName, Vault};
 use serde_json::{Value, json};
 
 const SECRET: &str = "re_live_0123456789abcdef";
@@ -351,7 +352,7 @@ struct Recording {
 }
 
 impl Approver for Recording {
-    fn approve(&self, reason: &str) -> Result<()> {
+    fn approve(&self, reason: &str, _secrets: &BTreeSet<SecretName>) -> Result<()> {
         self.reasons.lock().unwrap().push(reason.to_owned());
         if self.allow {
             Ok(())
@@ -425,5 +426,53 @@ fn run_with_unknown_secret_fails_before_asking() {
     );
     assert!(is_error);
     assert!(text.contains("missing"), "{text}");
+    assert!(reasons.lock().unwrap().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn run_asks_approval_for_placeholder_only_secrets() {
+    let (server, reasons) = approving_server(true);
+    tool(&server, "secret_capture", &json!({"name": "resend"}));
+    let (text, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["true", "{{resend}}"]}),
+    );
+    assert!(!is_error, "{text}");
+    let reasons = reasons.lock().unwrap();
+    assert_eq!(reasons.len(), 1);
+    assert!(reasons[0].contains("resend"), "{}", reasons[0]);
+    assert!(!reasons[0].contains(SECRET));
+}
+
+#[test]
+fn run_rejects_bad_env_var_before_asking() {
+    let (server, reasons) = approving_server(true);
+    tool(&server, "secret_capture", &json!({"name": "resend"}));
+    let (text, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["true"], "env": {"1BAD": "resend"}}),
+    );
+    assert!(is_error);
+    assert!(
+        text.contains("not a valid environment variable name"),
+        "{text}"
+    );
+    assert!(reasons.lock().unwrap().is_empty());
+}
+
+#[test]
+fn run_refuses_nested_lsv() {
+    let (server, reasons) = approving_server(true);
+    tool(&server, "secret_capture", &json!({"name": "resend"}));
+    let (text, is_error) = tool(
+        &server,
+        "secret_run",
+        &json!({"argv": ["lsv", "run", "T=resend", "--", "sh", "-c", "printf %s $T | base64"]}),
+    );
+    assert!(is_error);
+    assert!(text.contains("must not start lsv itself"), "{text}");
     assert!(reasons.lock().unwrap().is_empty());
 }

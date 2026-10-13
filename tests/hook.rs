@@ -39,6 +39,26 @@ const DENY: &[&str] = &[
     "lsv run T=x -- sh -c 'echo $T 1>&2'",
     "lsv run T=x -- sh -c 'echo $T > /dev/fd/1'",
     "lsv run T=x -- sh -c 'echo $T 2>&1'",
+    // --no-touch is for the human at a terminal only.
+    "lsv run --no-touch T=resend -- curl https://x",
+    "lsv run T=resend --no-touch -- curl https://x",
+    "cd /tmp && /usr/local/bin/lsv run \"--no-touch\" T=x -- true",
+    "bash -c 'lsv run --no-touch T=x -- true'",
+    // Touch ID settings cannot be changed from the agent.
+    "LSV_TOUCH_ID=off lsv run T=x -- curl https://x",
+    "export LSV_TOUCH_ID=off",
+    "unset LSV_TOUCH_ID",
+    "env -u LSV_TOUCH_ID lsv run T=x -- true",
+    "LSV_TOUCH_ID_TTL=3600 lsv mcp",
+    // Encoders and echo/printf by path.
+    "lsv run T=x -- sh -c '/bin/echo $T'",
+    "lsv run T=x -- sh -c 'printf %s $T | /usr/bin/base64'",
+    "lsv run T=x -- sh -c '/usr/bin/printf %s $T'",
+    // Redirects that still reach the agent.
+    "lsv run T=x -- sh -c 'echo $T > /dev/pts/0'",
+    "lsv run T=x -- sh -c 'echo $T > /proc/self/fd/1'",
+    "lsv run T=x -- bash -c 'echo $T > >(cat)'",
+    "lsv run T=x -- sh -c 'echo $T > $OUT'",
 ];
 
 const ALLOW: &[&str] = &[
@@ -59,6 +79,10 @@ const ALLOW: &[&str] = &[
     "lsv run T=tok -- sh -c 'echo $TERM'",
     "cmdkey /add:nas /user:u /pass:x",
     "echo $HOME",
+    "lsv run T=x -- curl -H \"Authorization: Bearer $T\" https://x",
+    "lsv run T=x -- sh -c 'echo $T > /dev/null'",
+    "lsv run T=x -- sh -c '/bin/echo $T > out.txt'",
+    "lsv info resend",
 ];
 
 #[test]
@@ -94,6 +118,35 @@ fn evaluates_hook_json() {
     assert!(evaluate(r#"{"tool_name":"Bash","tool_input":{}}"#).is_err());
 }
 
+#[test]
+fn deny_reasons_name_the_rule() {
+    let reason = |c: &str| match check_command(c) {
+        Decision::Deny(r) => r,
+        Decision::Allow => panic!("should deny: {c}"),
+    };
+    assert_eq!(
+        reason("lsv run --no-touch T=x -- true"),
+        "--no-touch skips Touch ID and is for your own terminal only"
+    );
+    assert_eq!(
+        reason("export LSV_TOUCH_ID=off"),
+        "changing LSV_TOUCH_ID would bypass Touch ID approval"
+    );
+    let run = argv(&[
+        "lsv",
+        "run",
+        "T=resend",
+        "--",
+        "sh",
+        "-c",
+        "printf %s $T | base64",
+    ]);
+    assert_eq!(
+        check_run(&run, &[]),
+        Decision::Deny("secret_run must not start lsv itself".to_owned())
+    );
+}
+
 fn argv(parts: &[&str]) -> Vec<String> {
     parts.iter().map(|p| (*p).to_owned()).collect()
 }
@@ -111,6 +164,30 @@ fn check_run_denies_leaky_argv() {
         (&["sh", "-c", "echo $T >/dev/stderr"], &["T"]),
         (&["sh", "-c", "echo $T 1>&2"], &["T"]),
         (&["sh", "-c", "printf %s $T > /dev/stdout"], &["T"]),
+        (
+            &[
+                "lsv",
+                "run",
+                "T=resend",
+                "--",
+                "sh",
+                "-c",
+                "printf %s $T | base64",
+            ],
+            &[],
+        ),
+        (&["/usr/local/bin/lsv", "list"], &[]),
+        (
+            &["sh", "-c", "lsv run --no-touch T=x -- curl https://x"],
+            &[],
+        ),
+        (&["sh", "-c", "./target/release/lsv run T=x -- true"], &[]),
+        (&["env", "LSV_TOUCH_ID=off", "true"], &[]),
+        (&["true"], &["LSV_TOUCH_ID"]),
+        (&["sh", "-c", "/bin/echo $T"], &["T"]),
+        (&["sh", "-c", "echo $T > /dev/pts/0"], &["T"]),
+        (&["sh", "-c", "echo $T >/proc/self/fd/1"], &["T"]),
+        (&["bash", "-c", "echo $T > >(cat)"], &["T"]),
     ];
     for (parts, vars) in cases {
         assert!(
@@ -138,6 +215,8 @@ fn check_run_allows_normal_argv() {
         (&["sshpass", "-e", "ssh", "root@nas"], &["PW"]),
         (&["sh", "-c", "echo $T > f"], &["T"]),
         (&["ls"], &[]),
+        (&["sh", "-c", "echo $T > /dev/null"], &["T"]),
+        (&["curl", "https://lsv.example.com"], &[]),
     ];
     for (parts, vars) in cases {
         assert_eq!(

@@ -30,23 +30,30 @@ cannot have that, so it is out of scope and documented as such.
   anything. On `Deny(reason)` the tool fails with a new
   `ErrorKind::Denied(String)` whose message is
   `refused by llm-secret-vault: <reason>`; nothing is spawned.
+- `check_run` also refuses an argv that invokes `lsv` itself (any word whose
+  basename is `lsv`, or `lsv` as a command word in a shell body), reason
+  `secret_run must not start lsv itself`, and any argv or `env` key
+  mentioning `LSV_TOUCH_ID`.
 - `lsv run` from the CLI is not checked (the human runs it; the Bash hook
   covers agents that use it through the shell).
 
 ## Part B: Touch ID approval
 
 - New module `approve`:
-  - `pub trait Approver: Send + Sync + fmt::Debug { fn approve(&self, reason: &str) -> Result<()>; }`
+  - `pub trait Approver: Send + Sync + fmt::Debug { fn approve(&self, reason: &str, secrets: &BTreeSet<SecretName>) -> Result<()>; }`
   - `AllowAll`: always `Ok`.
-  - `Cached<A>`: wraps an approver and skips it for `ttl` after a success.
-    `ttl` zero means ask every time.
+  - `Cached<A>`: wraps an approver and remembers an approval instant per
+    secret name. It skips the inner approver only when every requested name
+    was approved within `ttl`; on success it records all requested names.
+    `ttl` zero means ask every time. Approving `{a}` then asking `{a, b}`
+    asks again; asking `{a}` again does not.
   - `TouchId` (macOS only): `LAContext` with policy
     `DeviceOwnerAuthentication` (Touch ID, falling back to the login
     password), localized reason = `reason`. Waits on the reply block
     through a channel. Failure or cancel gives `ErrorKind::Denied`.
   - `Mode { Off, Mcp, All }` parsed from `LSV_TOUCH_ID` (case-insensitive
-    `off`, `mcp`, `all`; unset means `Mcp`; anything else is a usage error
-    reported at startup).
+    `off`, `mcp`, `all`; unset means `All`, so every secret use asks by
+    default; anything else is a usage error reported at startup).
   - `pub fn from_env(context: Context) -> Result<Box<dyn Approver>>` where
     `Context { Mcp, Cli }`. It returns `Cached<TouchId>` when the mode
     covers the context on macOS, otherwise `AllowAll`. TTL comes from
@@ -56,14 +63,31 @@ cannot have that, so it is out of scope and documented as such.
     and returns `AllowAll`.
 - `RunRequest::secret_names(&self) -> BTreeSet<SecretName>`: env names plus
   argv placeholders. `inject::run` uses it internally.
+- `RunRequest::validate(&self) -> Result<()>` rejects an empty argv and
+  invalid env var names. MCP `secret_run` and `lsv run` call it before the
+  unknown-name check and approval; `inject::run` still calls it too.
 - Callers ask for approval only when `secret_names()` is non-empty, after
-  validation and the guard, before `run`:
+  validation, the guard and the unknown-name check, before `run`:
   - MCP `secret_run`: reason `run "<cmd>" with secrets <a, b>` (built by
     `pub fn approve::run_reason(request: &RunRequest) -> String`), where
-    `<cmd>` is the argv joined
-    with spaces and cut to 80 characters plus `…`. Placeholders appear
-    unexpanded, so no value is ever in the prompt.
-  - `lsv run`: same reason, only in mode `All`.
+    `<cmd>` is the argv joined with spaces, whitespace runs collapsed to one
+    space, and cut to 80 characters plus `…`. Placeholders appear
+    unexpanded, so no value is ever in the prompt. The server keeps one
+    `Cached` approver for its lifetime, so approved names are reused for the
+    TTL.
+  - `lsv run`: same reason, in mode `All` (the default). Each `lsv run` is
+    its own process, so it asks every time. `lsv run --no-touch` (a flag
+    before `--`) skips approval for that run; it is for the human at a
+    terminal.
+- Guard hook rules that keep the agent from bypassing approval (they assume
+  the hook is installed):
+  - any command containing a `--no-touch` word is denied:
+    `--no-touch skips Touch ID and is for your own terminal only`;
+  - any command mentioning `LSV_TOUCH_ID` (covers `_TTL`, `env -u`,
+    `export`, `unset`) is denied:
+    `changing LSV_TOUCH_ID would bypass Touch ID approval`.
+- The `secret_run` description and server instructions end with "If a run
+  is refused or approval is denied, do not retry; ask the user."
 - `Server::with_approver(self, approver: Box<dyn Approver>) -> Self`; the
   default is `AllowAll` so existing tests are unchanged. `lsv mcp` installs
   `approve::from_env(Context::Mcp)?`.
@@ -76,7 +100,11 @@ cannot have that, so it is out of scope and documented as such.
   secret names, and none of the values; a denying approver stops the run;
   a run with no secrets does not ask.
 - `Cached` unit tests with a counting inner approver (ttl zero asks every
-  time; a positive ttl asks once; a failure is not cached).
+  time; a positive ttl asks once; a failure is not cached; the cache is
+  keyed by secret names).
+- Hook rows for `--no-touch`, `LSV_TOUCH_ID`, nested `lsv` in `check_run`,
+  encoders and `echo` by path, and `/dev/pts/*`, `/proc/*`, `>(...)`
+  redirect targets; a CLI test that `lsv run --help` lists `--no-touch`.
 - `Mode` parsing tests.
 - `TouchId` gets one `#[ignore]` test run by hand on a Mac.
 

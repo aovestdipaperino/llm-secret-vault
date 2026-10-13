@@ -50,6 +50,7 @@ lsv import nas-root                          # hidden prompt, typed twice
 lsv list                                     # names, lengths, fingerprints, dates
 lsv run HF_TOKEN=hf-token -- huggingface-cli upload me/model ./weights
 lsv run -- curl -H "Authorization: Bearer {{resend}}" https://api.resend.com/emails
+lsv run --no-touch HF_TOKEN=hf-token -- ./deploy.sh   # skip Touch ID, your terminal only
 lsv generate db-password --overwrite         # rotate
 lsv delete db-password
 ```
@@ -103,20 +104,49 @@ before anything is resolved; a match fails the call with
 analyses every
 `lsv run` in a command line (including `lsv` invoked by path) and blocks
 children that echo or encode an injected variable or dump the environment
-(`printenv`, `env` with only options, bare `set`, `export`, `export -p`). It
-also blocks direct keyring reads such as `security find-generic-password -w`
-or `secret-tool lookup`. Echo or printf with redirection is allowed. The hook
-is a heuristic over shell text, and its quote stripping is approximate. If it
-cannot parse its input it allows the command and prints a warning, so it can
-never wedge your session.
+(`printenv`, `env` with only options, bare `set`, `export`, `export -p`).
+Encoders and `echo`/`printf` are recognised by path too (`/bin/echo`,
+`/usr/bin/base64`). It also blocks direct keyring reads such as
+`security find-generic-password -w` or `secret-tool lookup`. Echo or printf
+with stdout redirected to a file is allowed; redirects to stdout, stderr or
+the terminal are refused, and so is any target under `/dev/` other than
+`/dev/null`, anything under `/proc/`, a process substitution such as
+`>(cat)` and a `$VARIABLE` target.
+
+Two rules protect Touch ID approval. Any command containing `--no-touch` is
+refused (`--no-touch skips Touch ID and is for your own terminal only`), and
+so is any command that mentions `LSV_TOUCH_ID`, which covers
+`LSV_TOUCH_ID_TTL`, `export`, `unset` and `env -u`
+(`changing LSV_TOUCH_ID would bypass Touch ID approval`). Inside the MCP
+server, a `secret_run` argv that starts `lsv` itself is refused
+(`secret_run must not start lsv itself`), as is one that mentions
+`LSV_TOUCH_ID`.
+
+The hook is a heuristic over shell text, and its quote stripping is
+approximate. Known gaps: any redirect of stdout to a file counts as hiding
+the output, so `echo $T >f >&2` is allowed even though the shell's last
+redirect wins and sends the value to stderr; only the last segment of a pipe
+is checked for `echo`/`printf`, so `echo $T | cat` is allowed; and any `{{`
+in a command that references a secret is treated as a placeholder, which
+over-blocks Go templates. If it cannot parse its input it allows the command
+and prints a warning, so it can never wedge your session.
 
 ## Touch ID
 
-On macOS `lsv` can ask for your fingerprint before it injects secrets into a
-command. The `LSV_TOUCH_ID` variable picks when: `off` never asks, `mcp` (the
-default) asks for MCP `secret_run` calls, and `all` also asks for `lsv run`
-from the command line. Nothing is asked for commands that use no secrets, and
-an unknown secret name fails before any prompt appears.
+On macOS every use of a secret asks for your fingerprint by default, both MCP
+`secret_run` calls and `lsv run` from the command line. The `LSV_TOUCH_ID`
+variable can change that: `all` (the default) asks everywhere, `mcp` asks for
+MCP `secret_run` calls only, and `off` never asks. Nothing is asked for
+commands that use no secrets, and a malformed request (empty argv, invalid
+environment variable name) or an unknown secret name fails before any prompt
+appears.
+
+At your own terminal you can skip the prompt for one run with
+`lsv run --no-touch VAR=name -- program`. That flag is for you, not for the
+agent: the guard hook refuses any agent command that uses it, and any command
+that mentions `LSV_TOUCH_ID`, so the agent cannot switch approval off. This
+protection assumes the guard hook is installed; without it an agent could run
+`lsv run --no-touch` through its shell tool.
 
 The prompt's reason reads `run "<command>" with secrets <names>`, where the
 command is the argv joined with spaces, cut to 80 characters plus `…` when
@@ -127,16 +157,20 @@ the prompt refuses the run with `Touch ID approval was denied or cancelled`,
 and the command is not started. A prompt left unanswered for two minutes is
 dismissed and counts as a refusal.
 
-After a successful approval the server does not ask again for
-`LSV_TOUCH_ID_TTL` seconds (default 300, maximum 3600; `0` asks every time).
-The approval is remembered by the running process only, so each `lsv run`
-from the shell asks on its own.
+After a successful approval the MCP server does not ask again for the same
+secrets for `LSV_TOUCH_ID_TTL` seconds (default 300, maximum 3600; `0` asks
+every time). Approvals are remembered per secret name: a run that adds a
+secret not approved within the TTL asks again. They live in the long-running
+server process only, so each `lsv run` from the shell is its own process and
+asks every time unless you pass `--no-touch`. Every LocalAuthentication
+failure (wrong finger, cancel, timeout, no biometrics) shows the same
+denial message.
 
 The MCP server reads these variables from its own environment, so set them
 where the server is registered. For Claude Code:
 
 ```bash
-claude mcp add --scope user llm-secret-vault -e LSV_TOUCH_ID=all -- lsv mcp
+claude mcp add --scope user llm-secret-vault -e LSV_TOUCH_ID_TTL=600 -- lsv mcp
 ```
 
 For plank, add an `env` key to the entry in `.mcp.json`:
@@ -145,7 +179,7 @@ For plank, add an `env` key to the entry in `.mcp.json`:
 "llm-secret-vault": {
   "command": "lsv",
   "args": ["mcp"],
-  "env": { "LSV_TOUCH_ID": "mcp", "LSV_TOUCH_ID_TTL": "300" }
+  "env": { "LSV_TOUCH_ID_TTL": "600" }
 }
 ```
 

@@ -51,6 +51,11 @@ static DIRECT_READS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 
 static LSV_RUN: LazyLock<Regex> =
     LazyLock::new(|| regex(r#"(?:^|[\s;&|("'`])(?:[^\s;&|()]*/)?lsv\s+run\b"#));
+/// Any invocation of `lsv` (bare or by path) as a command word.
+static LSV_INVOKE: LazyLock<Regex> =
+    LazyLock::new(|| regex(r#"(?:^|[\s;&|("'`])(?:[^\s;&|()]*/)?lsv(?:\s|$)"#));
+/// The `--no-touch` flag of `lsv run`, as a word of its own.
+static NO_TOUCH: LazyLock<Regex> = LazyLock::new(|| regex(r"(?:^|\s)--no-touch(?:[\s=]|$)"));
 static DOUBLE_DASH: LazyLock<Regex> = LazyLock::new(|| regex(r"\s--(\s|$)"));
 static BINDING: LazyLock<Regex> =
     LazyLock::new(|| regex(r"\b([A-Za-z_][A-Za-z0-9_]*)=[a-z0-9][a-z0-9._-]*"));
@@ -118,32 +123,44 @@ fn top_level_end(text: &str) -> usize {
 /// Output redirect: optional fd, `>` or `>>`, then the target (`&2` or a word).
 static REDIRECT: LazyLock<Regex> = LazyLock::new(|| regex(r"(\d*)>>?\s*(&\s*\d|[^\s;&|<>]+)"));
 
+/// Whether a redirect target may still reach the agent.
+///
+/// File descriptors (`&2`), devices other than `/dev/null` (`/dev/stdout`,
+/// `/dev/tty`, `/dev/pts/0`, ...), anything under `/proc/`, process
+/// substitutions (`>(cat)`) and expansions (`$OUT`) all count as visible.
+fn visible_target(target: &str) -> bool {
+    target.starts_with('&')
+        || (target.starts_with("/dev/") && target != "/dev/null")
+        || target.starts_with("/proc/")
+        || target.starts_with('(')
+        || target.starts_with('$')
+}
+
 /// Whether a command's stdout still reaches the agent: true unless stdout is
-/// redirected to a real file. Redirects to stdout, stderr or the terminal
-/// (`>&2`, `> /dev/stdout`, `2>&1`, ...) keep the output visible, and a
-/// redirect of another fd (`2>f`) leaves stdout alone.
+/// redirected to a real file (see [`visible_target`]). A redirect of another
+/// fd (`2>f`) leaves stdout alone.
 fn reaches_agent(segment: &str) -> bool {
-    const VISIBLE: [&str; 7] = [
-        "&1",
-        "&2",
-        "/dev/stdout",
-        "/dev/stderr",
-        "/dev/tty",
-        "/dev/fd/1",
-        "/dev/fd/2",
-    ];
     !REDIRECT.captures_iter(segment).any(|c| {
         let fd = &c[1];
         let target: String = c[2].split_whitespace().collect();
-        (fd.is_empty() || fd == "1") && !VISIBLE.contains(&target.as_str())
+        (fd.is_empty() || fd == "1") && !visible_target(&target)
     })
+}
+
+const TOUCH_ID_VAR: &str = "LSV_TOUCH_ID";
+const TOUCH_ID_VAR_REASON: &str = "changing LSV_TOUCH_ID would bypass Touch ID approval";
+const NO_TOUCH_REASON: &str = "--no-touch skips Touch ID and is for your own terminal only";
+const NESTED_LSV_REASON: &str = "secret_run must not start lsv itself";
+
+fn strip_quotes(text: &str) -> String {
+    text.chars().filter(|c| !matches!(c, '\'' | '"')).collect()
 }
 
 /// Checks the child part of an `lsv run` command line.
 fn check_child(child: &str, vars: &[&str]) -> Option<String> {
     // Quote stripping is heuristic: it lets `sh -c '...'` bodies be inspected
     // as plain command lines, at the cost of ignoring real quoting rules.
-    let unquoted: String = child.chars().filter(|c| !matches!(c, '\'' | '"')).collect();
+    let unquoted = strip_quotes(child);
     let references = |s: &str| s.contains("{{") || vars.iter().any(|v| mentions_var(s, v));
     for command in SEPARATORS.split(&unquoted) {
         let command = SHELL_PREFIX.replace(command.trim(), "");
@@ -159,7 +176,7 @@ fn check_child(child: &str, vars: &[&str]) -> Option<String> {
         }
         if let Some(encoder) = segments
             .iter()
-            .map(|s| first_word(s))
+            .map(|s| basename(first_word(s)))
             .find(|w| ENCODERS.contains(w))
         {
             return Some(format!(
@@ -167,7 +184,7 @@ fn check_child(child: &str, vars: &[&str]) -> Option<String> {
             ));
         }
         if let Some(last) = segments.last() {
-            let word = first_word(last);
+            let word = basename(first_word(last));
             if matches!(word, "echo" | "printf") && references(last) && reaches_agent(last) {
                 return Some(format!("`{word}` would print an injected secret"));
             }
@@ -179,6 +196,14 @@ fn check_child(child: &str, vars: &[&str]) -> Option<String> {
 /// Decides whether a shell command line may run.
 #[must_use]
 pub fn check_command(command: &str) -> Decision {
+    if command.contains(TOUCH_ID_VAR) {
+        return Decision::Deny(TOUCH_ID_VAR_REASON.to_owned());
+    }
+    // Any `--no-touch` word is refused, not only after a literal `lsv run`,
+    // so aliases and variables cannot smuggle it past the guard.
+    if NO_TOUCH.is_match(&strip_quotes(command)) {
+        return Decision::Deny(NO_TOUCH_REASON.to_owned());
+    }
     for (pattern, reason) in DIRECT_READS.iter() {
         if pattern.is_match(command) {
             return Decision::Deny((*reason).to_owned());
@@ -204,10 +229,20 @@ pub fn check_command(command: &str) -> Decision {
 /// Decides whether an MCP `secret_run` argv may run.
 ///
 /// Applies the `lsv run` child rules to `argv` joined with spaces, with
-/// `vars` as the injected environment variable names.
+/// `vars` as the injected environment variable names. Also refuses any argv
+/// that starts `lsv` itself (which could use `--no-touch` or print what it
+/// injects) or mentions `LSV_TOUCH_ID`.
 #[must_use]
 pub fn check_run(argv: &[String], vars: &[&str]) -> Decision {
     let command = argv.join(" ");
+    if command.contains(TOUCH_ID_VAR) || vars.iter().any(|v| v.contains(TOUCH_ID_VAR)) {
+        return Decision::Deny(TOUCH_ID_VAR_REASON.to_owned());
+    }
+    if argv.iter().any(|a| basename(first_word(a)) == "lsv")
+        || LSV_INVOKE.is_match(&strip_quotes(&command))
+    {
+        return Decision::Deny(NESTED_LSV_REASON.to_owned());
+    }
     for (pattern, reason) in DIRECT_READS.iter() {
         if pattern.is_match(&command) {
             return Decision::Deny((*reason).to_owned());

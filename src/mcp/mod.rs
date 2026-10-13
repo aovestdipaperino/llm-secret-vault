@@ -18,7 +18,8 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 const INSTRUCTIONS: &str = "Secrets are referenced by name and never returned. \
 When the user says a key or password is in the clipboard, call secret_capture. \
 Use secret_run to pass secrets to commands through env vars or {{name}} placeholders. \
-Never ask the user to paste a secret into the chat.";
+Never ask the user to paste a secret into the chat. \
+If a run is refused or approval is denied, do not retry; ask the user.";
 
 /// Protocol versions this server can speak, newest first.
 pub const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];

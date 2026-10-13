@@ -149,7 +149,7 @@ pub(super) fn definitions() -> Value {
         },
         {
             "name": "secret_run",
-            "description": "Run a command with secrets injected. Map env var names to secret names in `env`, or write {{secret-name}} inside any argv element, including the program. stdout/stderr come back with secret values replaced by «redacted:name». Do not try to print secrets.",
+            "description": "Run a command with secrets injected. Map env var names to secret names in `env`, or write {{secret-name}} inside any argv element, including the program. stdout/stderr come back with secret values replaced by «redacted:name». Do not try to print secrets. If a run is refused or approval is denied, do not retry; ask the user.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -248,13 +248,14 @@ pub(super) fn call(
             if let Some(dir) = args.cwd {
                 request = request.cwd(dir);
             }
+            request.validate()?;
             let names = request.secret_names();
             if !names.is_empty() {
                 // Fail on unknown names before showing a prompt.
                 for name in &names {
                     vault.info(name)?;
                 }
-                approver.approve(&approve::run_reason(&request))?;
+                approver.approve(&approve::run_reason(&request), &names)?;
             }
             pretty(&run(vault, &request)?)
         }

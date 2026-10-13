@@ -108,6 +108,24 @@ impl RunRequest {
         &self.argv
     }
 
+    /// Checks the request shape without touching the vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::Usage`] for an empty argv or an invalid
+    /// environment variable name.
+    pub fn validate(&self) -> Result<()> {
+        if self.argv.is_empty() {
+            return Err(usage("argv must contain at least the program to run"));
+        }
+        if let Some(var) = self.env.keys().find(|v| !is_env_var_name(v)) {
+            return Err(usage(format!(
+                "`{var}` is not a valid environment variable name"
+            )));
+        }
+        Ok(())
+    }
+
     /// Returns every secret this request would inject, by name.
     #[must_use]
     pub fn secret_names(&self) -> BTreeSet<SecretName> {
@@ -343,15 +361,11 @@ fn supervise(
 ///
 /// Panics only if the child's piped streams are missing, which is a bug.
 pub fn run(vault: &Vault, request: &RunRequest) -> Result<RunOutput> {
+    request.validate()?;
     let template = request
         .argv
         .first()
         .ok_or_else(|| usage("argv must contain at least the program to run"))?;
-    if let Some(var) = request.env.keys().find(|v| !is_env_var_name(v)) {
-        return Err(usage(format!(
-            "`{var}` is not a valid environment variable name"
-        )));
-    }
 
     let mut values = BTreeMap::new();
     for name in request.secret_names() {
