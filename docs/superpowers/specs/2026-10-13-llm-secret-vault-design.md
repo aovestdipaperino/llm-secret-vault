@@ -54,9 +54,10 @@ nothing for the hook to enforce).
 
 1. **No read verb.** No CLI subcommand and no MCP tool returns secret material.
    The only way to view a value is the OS keyring's own UI.
-2. **Resolve only at injection.** Only the `inject` module calls
-   `Backend::resolve` (enforced with `pub(crate)` visibility and a test that
-   greps the crate for other call sites). The value goes straight into the
+2. **Resolve only at injection.** Secret values are resolved only by the
+   `inject` module (through `Vault::resolve`, which is `pub(crate)`); the only
+   other caller of `Backend::resolve` is `fingerprint`, for its reserved HMAC
+   key. A test greps the crate for other call sites. The value goes straight into the
    child and its output is redacted before it is returned.
 3. **No values in `lsv`'s own argv, files or logs.** The deliberate exception is
    `{{name}}` placeholders, which put the value in the *child's* argv; this is
@@ -136,9 +137,14 @@ No display on Linux (no X11/Wayland): error suggesting `lsv import`.
 `tool_input.command` for `Bash`, and returns a deny decision with a
 human-readable reason naming the rule when it matches:
 
-- `lsv run` whose child references an injected variable through an output or
-  encoding command: `echo`, `printf`, `printenv`, `env`, `set`, `export -p`,
-  `rev`, `base64`, `xxd`, `od`, `hexdump`, redirection `>`/`>>`, `tee`.
+- `lsv run` whose child dumps the environment: `printenv`, bare `env`, bare
+  `set`, `export -p`.
+- `lsv run` whose child pipeline references an injected variable (`$VAR`,
+  `${VAR}`) or a `{{name}}` placeholder and either contains an encoder (`rev`,
+  `base64`, `xxd`, `od`, `hexdump`) or ends in `echo`/`printf` writing to
+  stdout. `printf %s "$T" | docker login --password-stdin` stays allowed.
+  Redirection and `tee` are not flagged: they usually save a command's output,
+  not the secret, and flagging them caused too many false positives.
 - Direct keyring reads bypassing `lsv`: `security find-generic-password` or
   `find-internet-password` with `-w`/`-g`, `secret-tool lookup`, `cmdkey /list`
   with `/pass`, PowerShell `Get-StoredCredential`.
@@ -163,7 +169,8 @@ validation failed, spawn failed, timeout. MCP maps them to tool results with
 - Property test (proptest): with random values in `MemoryBackend` and a child
   that prints arbitrary mixes of values and noise, no `secret_run` response
   contains any stored value in any covered encoding.
-- MCP: golden JSON-RPC transcripts for every tool, including errors.
+- MCP: JSON-RPC request/response tests for every method and tool, including
+  errors, each asserting no stored value appears in any response.
 - Hook: table of allowed and denied commands.
 - `inject`: env and placeholder substitution, unknown name fails pre-spawn,
   timeout, output cap.
