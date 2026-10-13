@@ -6,6 +6,7 @@
 
 pub mod error;
 pub mod name;
+pub mod redact;
 pub mod vault;
 
 mod backend;
