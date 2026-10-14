@@ -68,12 +68,17 @@ secret without a prompt unless the mode is `off`. It fails by design: in mode
 shown, which is the documented meaning of that mode. The counterexample is a
 one-step trace and is kept as a reminder of the trade-off.
 
-## Known limitation
+## Markers and secrets that spell marker text
 
-The no-leak property holds only when markers cannot combine with input to
-spell a secret. With real markers (`«redacted:<label>»`) a secret that contains
-marker text can still appear in the output: `redact_all([("k", "k»Q")],
-"k»QQ")` returns `«redacted:k»Q`, which contains `k»Q`, and a secret
-`acted:a` stored as `api` appears inside its own marker. Both need a secret
-that contains `«`, `»` or a slice of the marker, which random tokens and
-passwords practically never do.
+The exhaustive check isolates the scanner from marker text. With the real
+`«redacted:<label>»` markers, a secret that contains `«`, `»` or a slice of a
+marker used to reappear in the output: `redact_all([("k", "k»Q")], "k»QQ")`
+returned `«redacted:k»Q`, and a secret `acted:a` stored as `api` appeared
+inside its own marker.
+
+`Redactor::new` now detects that case and replaces every marker with one
+character no secret contains (`█` first). Every pattern is valid UTF-8, so an
+occurrence that touches a marker has to contain the whole marker character,
+which no pattern does. That restores the setting of the exhaustive check:
+markers that no secret can overlap. The regression test is
+`redact::tests::secret_that_spells_marker_text_falls_back_to_plain_marker`.

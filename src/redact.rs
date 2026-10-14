@@ -7,7 +7,10 @@
 //! inside a larger blob is not covered.
 //!
 //! Matches that overlap or touch are merged into one span, replaced by one
-//! marker per distinct label in the order the secrets were found.
+//! marker per distinct label in the order the secrets were found. If any
+//! secret could reappear through marker text (it contains `«` or `»`, or a
+//! slice of a marker), every label is replaced by one plain character that no
+//! secret contains, such as `█`.
 
 use std::fmt::{self, Write as _};
 
@@ -70,6 +73,35 @@ fn variants(value: &str) -> Vec<Vec<u8>> {
     all
 }
 
+fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+    haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Whether `pattern` could reappear in output through the labelled markers.
+///
+/// Every pattern is valid UTF-8, so an occurrence that crosses the start of a
+/// marker contains the whole `«` and one that crosses its end contains the
+/// whole `»`. The only other way is to sit inside a marker.
+fn clashes_with_markers(pattern: &Pattern, all: &[Pattern]) -> bool {
+    let bytes = pattern.bytes.as_slice();
+    contains(bytes, "«".as_bytes())
+        || contains(bytes, "»".as_bytes())
+        || all.iter().any(|p| contains(&p.marker, bytes))
+}
+
+/// A one-character marker that no pattern contains.
+///
+/// By the same UTF-8 argument, a pattern without that character can neither
+/// sit inside the marker nor cross its edges. Secrets are finite, so the
+/// search always ends.
+fn fallback_marker(patterns: &[Pattern]) -> Vec<u8> {
+    (0x2588..=u32::from(char::MAX))
+        .filter_map(char::from_u32)
+        .map(|c| c.to_string().into_bytes())
+        .find(|m| !patterns.iter().any(|p| contains(&p.bytes, m)))
+        .expect("finite secrets leave some character unused")
+}
+
 /// Redacts secrets from a byte stream, even when a value spans two chunks.
 ///
 /// It holds back the last `longest pattern - 1` bytes of each chunk until
@@ -117,6 +149,12 @@ impl Redactor {
                     bytes: Zeroizing::new(bytes),
                     marker: marker.clone(),
                 });
+            }
+        }
+        if patterns.iter().any(|p| clashes_with_markers(p, &patterns)) {
+            let marker = fallback_marker(&patterns);
+            for pattern in &mut patterns {
+                pattern.marker.clone_from(&marker);
             }
         }
         Self::from_patterns(patterns)
@@ -406,10 +444,6 @@ mod tests {
         all
     }
 
-    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
-        haystack.windows(needle.len()).any(|w| w == needle)
-    }
-
     /// Bounded exhaustive check of the scanner: for every pair of secrets up to
     /// `max_pattern` bytes and every input up to `max_input` bytes over the
     /// alphabet `{0, 1, 2}`, no secret survives, clean input is unchanged, and
@@ -468,6 +502,17 @@ mod tests {
     #[ignore = "about 10 s in release; run with --release -- --ignored"]
     fn exhaustive_large() {
         exhaustive(3, 6);
+    }
+
+    #[test]
+    fn secret_that_spells_marker_text_falls_back_to_plain_marker() {
+        for (secret, input) in [("k»Q", "k»QQ"), ("acted:a", "acted:a"), ("x«r", "x«rx«r")] {
+            let out = redact(&[("api", secret)], input);
+            assert!(!out.contains(secret), "{secret}: {out}");
+            assert!(!out.contains("redacted"), "{secret}: {out}");
+        }
+        assert_eq!(redact(&[("k", "k»Q")], "k»QQ"), "█Q");
+        assert_eq!(redact(&[("k", "«█")], "«█"), "▉");
     }
 
     #[test]
