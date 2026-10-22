@@ -191,6 +191,7 @@ pub(super) fn call(
                 expect_prefix: args.expect_prefix,
                 min_len: args.min_len,
                 allow_multiline: args.allow_multiline,
+                user: None,
             };
             let mut board = clipboard()?;
             let report = capture(vault, board.as_mut(), &name, &options)?;
@@ -212,6 +213,7 @@ pub(super) fn call(
                 length: args.length.unwrap_or(defaults.length),
                 alphabet: args.alphabet.unwrap_or(defaults.alphabet),
                 overwrite: args.overwrite,
+                user: None,
             };
             let meta = generate(vault, &name, &options)?;
             Ok(format!(

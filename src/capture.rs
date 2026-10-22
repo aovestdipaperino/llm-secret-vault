@@ -6,7 +6,7 @@ use serde::Serialize;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::name::SecretName;
+use crate::name::{SecretName, SecretUser};
 use crate::vault::{Meta, Source, Vault};
 
 /// Default minimum length for captured values.
@@ -89,6 +89,8 @@ pub struct CaptureOptions {
     pub min_len: Option<usize>,
     /// Accept values containing newlines or longer than [`MAX_SINGLE_LINE_LEN`].
     pub allow_multiline: bool,
+    /// Account the secret belongs to; on overwrite `None` keeps the current one.
+    pub user: Option<SecretUser>,
 }
 
 /// Outcome of a successful [`capture`].
@@ -164,7 +166,13 @@ pub fn capture(
     if vault.exists(name) && !options.overwrite {
         return Err(Error::new(ErrorKind::NameExists(name.to_string())));
     }
-    let meta = vault.store(name, &value, Source::Clipboard, options.overwrite, None)?;
+    let meta = vault.store(
+        name,
+        &value,
+        Source::Clipboard,
+        options.overwrite,
+        options.user.as_ref(),
+    )?;
     let still_there = match clipboard.text() {
         Ok(Some(now)) => Zeroizing::new(now) == original,
         _ => false,
@@ -386,5 +394,17 @@ mod tests {
         )
         .unwrap();
         assert!(report.meta.rotated.is_some());
+    }
+
+    #[test]
+    fn stores_user() {
+        let vault = Vault::in_memory();
+        let mut cb = clip("hunter2-long-enough");
+        let options = CaptureOptions {
+            user: Some(SecretUser::new("root").unwrap()),
+            ..Default::default()
+        };
+        let report = capture(&vault, &mut cb, &name("nas-root"), &options).unwrap();
+        assert_eq!(report.meta.user, Some(SecretUser::new("root").unwrap()));
     }
 }

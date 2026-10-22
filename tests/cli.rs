@@ -30,6 +30,7 @@ fn help_lists_subcommands() {
     let text = String::from_utf8(out.stdout).unwrap();
     for sub in [
         "list", "info", "capture", "generate", "import", "run", "delete", "mcp", "hook", "setup",
+        "user",
     ] {
         assert!(text.contains(sub), "missing {sub}");
     }
@@ -119,4 +120,34 @@ fn bad_env_var_is_rejected_before_opening_vault() {
             .unwrap()
             .contains("not a valid environment variable name")
     );
+}
+
+#[test]
+fn user_needs_exactly_one_of_value_and_clear() {
+    for args in [
+        &["user", "nas-root"][..],
+        &["user", "nas-root", "root", "--clear"][..],
+    ] {
+        let out = lsv().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(err.contains("Usage:"), "{err}");
+    }
+}
+
+#[test]
+fn invalid_user_is_rejected_before_opening_vault() {
+    for args in [
+        &["user", "nas-root", "two words"][..],
+        &["capture", "nas-root", "--user", "two words"][..],
+        &["generate", "nas-root", "--user", "two words"][..],
+    ] {
+        let out = lsv().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(
+            err.contains("invalid user: it contains whitespace"),
+            "{err}"
+        );
+    }
 }

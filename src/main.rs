@@ -11,7 +11,7 @@ use llm_secret_vault::hook::{Decision, evaluate};
 use llm_secret_vault::import::import;
 use llm_secret_vault::inject::{RunRequest, run};
 use llm_secret_vault::mcp::Server;
-use llm_secret_vault::{Error, ErrorKind, Meta, Result, SecretName, Vault};
+use llm_secret_vault::{Error, ErrorKind, Meta, Result, SecretName, SecretUser, Vault};
 
 /// Let LLM agents use secrets they can never read.
 #[derive(Debug, Parser)]
@@ -41,6 +41,9 @@ enum Cmd {
         min_len: Option<usize>,
         #[arg(long)]
         allow_multiline: bool,
+        /// Account this secret belongs to, e.g. root.
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Generate a random secret without showing it.
     Generate {
@@ -51,12 +54,28 @@ enum Cmd {
         alphabet: Alphabet,
         #[arg(long)]
         overwrite: bool,
+        /// Account this secret belongs to, e.g. root.
+        #[arg(long)]
+        user: Option<String>,
     },
     /// Type a secret at a hidden prompt.
     Import {
         name: String,
         #[arg(long)]
         overwrite: bool,
+        /// Account this secret belongs to, e.g. root.
+        #[arg(long)]
+        user: Option<String>,
+    },
+    /// Set or clear the user (account) a secret belongs to.
+    User {
+        name: String,
+        /// The user, e.g. root.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        user: Option<String>,
+        /// Remove the user.
+        #[arg(long)]
+        clear: bool,
     },
     /// Run a command with secrets injected: lsv run VAR=name ... -- program args.
     Run {
@@ -184,6 +203,7 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
             expect_prefix,
             min_len,
             allow_multiline,
+            user,
         } => {
             let name = SecretName::new(name)?;
             let options = CaptureOptions {
@@ -191,44 +211,47 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
                 expect_prefix,
                 min_len,
                 allow_multiline,
+                user: parse_user(user)?,
             };
-            let mut clipboard = SystemClipboard::new()?;
-            let report = capture(&Vault::open()?, &mut clipboard, &name, &options)?;
-            println!(
-                "stored {name}: {} chars, fp {}{}",
-                report.meta.len,
-                report.meta.fingerprint,
-                if report.clipboard_cleared {
-                    ", clipboard cleared"
-                } else {
-                    ", clipboard NOT cleared (clear it manually)"
-                }
-            );
-            Ok(ExitCode::SUCCESS)
+            capture_main(&name, &options)
         }
         Cmd::Generate {
             name,
             length,
             alphabet,
             overwrite,
+            user,
         } => {
             let name = SecretName::new(name)?;
-            let meta = generate(
-                &Vault::open()?,
-                &name,
-                &GenerateOptions {
-                    length,
-                    alphabet,
-                    overwrite,
-                },
-            )?;
+            let options = GenerateOptions {
+                length,
+                alphabet,
+                overwrite,
+                user: parse_user(user)?,
+            };
+            let meta = generate(&Vault::open()?, &name, &options)?;
             println!("stored {name}: {} chars, fp {}", meta.len, meta.fingerprint);
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::Import { name, overwrite } => {
+        Cmd::Import {
+            name,
+            overwrite,
+            user,
+        } => {
             let name = SecretName::new(name)?;
-            let meta = import(&Vault::open()?, &name, overwrite)?;
+            let user = parse_user(user)?;
+            let meta = import(&Vault::open()?, &name, overwrite, user.as_ref())?;
             println!("stored {name}: {} chars, fp {}", meta.len, meta.fingerprint);
+            Ok(ExitCode::SUCCESS)
+        }
+        Cmd::User { name, user, .. } => {
+            let name = SecretName::new(name)?;
+            let user = parse_user(user)?;
+            let meta = Vault::open()?.set_user(&name, user.as_ref())?;
+            match &meta.user {
+                Some(user) => println!("{name}: user {user}"),
+                None => println!("{name}: user cleared"),
+            }
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Run {
@@ -251,6 +274,22 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
     }
+}
+
+fn capture_main(name: &SecretName, options: &CaptureOptions) -> Result<ExitCode> {
+    let mut clipboard = SystemClipboard::new()?;
+    let report = capture(&Vault::open()?, &mut clipboard, name, options)?;
+    println!(
+        "stored {name}: {} chars, fp {}{}",
+        report.meta.len,
+        report.meta.fingerprint,
+        if report.clipboard_cleared {
+            ", clipboard cleared"
+        } else {
+            ", clipboard NOT cleared (clear it manually)"
+        }
+    );
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run_main(bindings: &[String], argv: Vec<String>, no_touch: bool) -> Result<ExitCode> {
@@ -316,19 +355,24 @@ fn usage(why: String) -> Error {
     Error::from_kind(ErrorKind::Usage(why))
 }
 
+fn parse_user(user: Option<String>) -> Result<Option<SecretUser>> {
+    user.map(SecretUser::new).transpose()
+}
+
 fn print_table(secrets: &[Meta]) {
     if secrets.is_empty() {
         println!("no secrets stored");
         return;
     }
     println!(
-        "{:<32} {:>5}  {:<8}  {:<9}  UPDATED",
-        "NAME", "LEN", "FP", "SOURCE"
+        "{:<32} {:<16} {:>5}  {:<8}  {:<9}  UPDATED",
+        "NAME", "USER", "LEN", "FP", "SOURCE"
     );
     for meta in secrets {
         println!(
-            "{:<32} {:>5}  {:<8}  {:<9}  {}",
+            "{:<32} {:<16} {:>5}  {:<8}  {:<9}  {}",
             meta.name,
+            user_label(meta),
             meta.len,
             meta.fingerprint,
             source_label(meta),
@@ -339,6 +383,7 @@ fn print_table(secrets: &[Meta]) {
 
 fn print_info(meta: &Meta) {
     println!("name:        {}", meta.name);
+    println!("user:        {}", user_label(meta));
     println!("length:      {}", meta.len);
     println!("fingerprint: {}", meta.fingerprint);
     println!("source:      {}", source_label(meta));
@@ -346,6 +391,10 @@ fn print_info(meta: &Meta) {
     if let Some(rotated) = meta.rotated {
         println!("rotated:     {}", date(rotated));
     }
+}
+
+fn user_label(meta: &Meta) -> &str {
+    meta.user.as_ref().map_or("-", SecretUser::as_str)
 }
 
 fn source_label(meta: &Meta) -> String {

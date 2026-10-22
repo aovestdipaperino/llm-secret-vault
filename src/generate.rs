@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::name::SecretName;
+use crate::name::{SecretName, SecretUser};
 use crate::vault::{Meta, Source, Vault};
 
 /// Shortest generated value.
@@ -40,7 +40,7 @@ impl Alphabet {
 }
 
 /// Parameters for [`generate`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct GenerateOptions {
     /// Number of characters.
     pub length: usize,
@@ -48,6 +48,8 @@ pub struct GenerateOptions {
     pub alphabet: Alphabet,
     /// Replace an existing secret with the same name.
     pub overwrite: bool,
+    /// Account the secret belongs to; on overwrite `None` keeps the current one.
+    pub user: Option<SecretUser>,
 }
 
 impl Default for GenerateOptions {
@@ -56,6 +58,7 @@ impl Default for GenerateOptions {
             length: 32,
             alphabet: Alphabet::Alnum,
             overwrite: false,
+            user: None,
         }
     }
 }
@@ -91,7 +94,13 @@ pub fn generate(vault: &Vault, name: &SecretName, options: &GenerateOptions) -> 
         ))));
     }
     let value = random_string(options.length, &options.alphabet.chars())?;
-    vault.store(name, &value, Source::Generated, options.overwrite, None)
+    vault.store(
+        name,
+        &value,
+        Source::Generated,
+        options.overwrite,
+        options.user.as_ref(),
+    )
 }
 
 #[cfg(test)]
@@ -155,5 +164,17 @@ mod tests {
                 ErrorKind::Usage(_)
             ));
         }
+    }
+
+    #[test]
+    fn generate_stores_user() {
+        let vault = Vault::in_memory();
+        let name = SecretName::new("db-app").unwrap();
+        let options = GenerateOptions {
+            user: Some(SecretUser::new("app").unwrap()),
+            ..Default::default()
+        };
+        let meta = generate(&vault, &name, &options).unwrap();
+        assert_eq!(meta.user, Some(SecretUser::new("app").unwrap()));
     }
 }
