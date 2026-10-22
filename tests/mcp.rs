@@ -522,6 +522,7 @@ fn invalid_user_stores_nothing() {
             text.contains("invalid user: it contains whitespace"),
             "{text}"
         );
+        assert!(!text.contains("two words"), "{text}");
     }
     let (list, _) = tool(&server, "secret_list", &json!({}));
     assert_eq!(list.trim(), "[]");

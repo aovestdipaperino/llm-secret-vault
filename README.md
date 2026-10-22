@@ -53,7 +53,7 @@ lsv capture nas-root --user root             # record which account the password
 lsv user nas-enzo enzo                       # set (or --clear) the user of an existing secret
 lsv generate db-password --length 40         # random, never shown
 lsv import nas-root                          # hidden prompt, typed twice
-lsv list                                     # names, lengths, fingerprints, dates
+lsv list                                     # names, users, lengths, fingerprints, dates
 lsv run HF_TOKEN=hf-token -- huggingface-cli upload me/model ./weights
 lsv run -- curl -H "Authorization: Bearer {{resend}}" https://api.resend.com/emails
 lsv run --no-touch HF_TOKEN=hf-token -- ./deploy.sh   # skip Touch ID, your terminal only
@@ -77,7 +77,7 @@ cleared, for instance because you copied something else in the meantime.
 | `secret_generate` | Random value, optional `user`, `overwrite: true` rotates |
 | `secret_run` | Run an argv with `env` bindings and `{{name}}` placeholders; redacted output |
 
-A secret can record the user it belongs to, so a host with several accounts can hold `nas-root` (user `root`) and `nas-enzo` (user `enzo`) and the agent picks by user. The user is not secret: it is stored in the index, shown by `list` and `info`, and typed into commands by the agent. Overwriting a secret without a user keeps the old one. Only `lsv user` changes the user of an existing secret; there is no MCP tool for it.
+A secret can record the user it belongs to, so a host with several accounts can hold `nas-root` (user `root`) and `nas-enzo` (user `enzo`) and the agent picks by user. The user is not secret: it is stored in the index, shown by `list` and `info`, and typed into commands by the agent. Overwriting a secret without a user keeps the old one. A user equal to the secret value is refused. No MCP tool relabels a secret on its own: an agent can only change the user by overwriting the value through `secret_capture` or `secret_generate`, while `lsv user` changes it alone from the CLI.
 
 `secret_run` takes `timeout_s` from 1 to 3600 (default 120) and
 `max_output_kb` from 1 to 1024 (default 32). When the timeout expires the

@@ -146,6 +146,7 @@ impl Vault {
     /// # Errors
     ///
     /// Returns [`ErrorKind::InvalidValue`] if the value length is out of range,
+    /// [`ErrorKind::InvalidUser`] if `user` equals `value`,
     /// [`ErrorKind::NameExists`] if the name exists and `overwrite` is false,
     /// [`ErrorKind::Keyring`] or [`ErrorKind::Index`] if storage fails.
     ///
@@ -171,6 +172,11 @@ impl Vault {
                 "{} bytes, maximum is {MAX_VALUE_LEN}",
                 value.len()
             ))));
+        }
+        if user.is_some_and(|u| u.as_str() == value) {
+            return Err(Error::new(ErrorKind::InvalidUser(
+                "it equals the secret value".to_owned(),
+            )));
         }
         let _guard = self.inner.write_lock.lock().expect("write lock poisoned");
         let existing = self.inner.index.get(name);
@@ -288,6 +294,26 @@ mod tests {
                 .as_str(),
             "hunter2-long"
         );
+    }
+
+    #[test]
+    fn refuses_user_equal_to_value() {
+        let vault = Vault::in_memory();
+        let err = vault
+            .store(
+                &name("k"),
+                "value-12345",
+                Source::Clipboard,
+                false,
+                Some(&user("value-12345")),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            &ErrorKind::InvalidUser("it equals the secret value".to_owned())
+        );
+        assert!(!err.to_string().contains("value-12345"));
+        assert!(!vault.exists(&name("k")));
     }
 
     #[test]

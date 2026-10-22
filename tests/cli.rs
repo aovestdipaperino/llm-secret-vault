@@ -124,14 +124,18 @@ fn bad_env_var_is_rejected_before_opening_vault() {
 
 #[test]
 fn user_needs_exactly_one_of_value_and_clear() {
-    for args in [
-        &["user", "nas-root"][..],
-        &["user", "nas-root", "root", "--clear"][..],
+    for (args, wording) in [
+        (&["user", "nas-root"][..], "required"),
+        (
+            &["user", "nas-root", "root", "--clear"][..],
+            "cannot be used with",
+        ),
     ] {
         let out = lsv().args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}");
         let err = String::from_utf8(out.stderr).unwrap();
         assert!(err.contains("Usage:"), "{err}");
+        assert!(err.contains(wording), "{err}");
     }
 }
 

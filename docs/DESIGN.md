@@ -111,7 +111,7 @@ grandchildren. The output cap also bounds the raw bytes fed into the redactor;
 when output is truncated, pending bytes are dropped rather than flushed
 unredacted.
 
-A secret's user is optional, non-secret metadata validated by `SecretUser` (1-128 characters, no whitespace or control characters, no `{{` or `}}`). Overwrite without a user keeps the existing one. Only `lsv user` changes it without storing a value.
+A secret's user is optional, non-secret metadata validated by `SecretUser` (1-128 characters, no whitespace, control, invisible or bidirectional formatting characters, no `{{` or `}}`). A user equal to the secret value is refused. Overwrite without a user keeps the existing one. No MCP tool changes it on its own: an agent can only change it by overwriting the value, while `lsv user` changes it alone from the CLI.
 
 The index re-reads `index.json` on every read and before each write, so a
 running MCP server sees secrets added by the CLI. There is no file locking, so

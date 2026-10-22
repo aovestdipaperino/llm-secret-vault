@@ -92,6 +92,21 @@ impl AsRef<str> for SecretName {
 /// Maximum length of a secret's user, in characters.
 pub const MAX_USER_LEN: usize = 128;
 
+/// Returns whether `c` is an invisible or bidirectional formatting character.
+fn is_invisible(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{61C}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{2069}'
+            | '\u{FEFF}'
+    )
+}
+
 /// The account a secret belongs to, such as `root` or `admin@corp.com`.
 ///
 /// Users are 1-128 characters without whitespace or control characters and
@@ -118,21 +133,23 @@ impl SecretUser {
     pub fn new(user: impl AsRef<str>) -> Result<Self> {
         let user = user.as_ref();
         let broken = if user.is_empty() {
-            Some("it is empty")
+            Some("it is empty".to_owned())
         } else if user.chars().count() > MAX_USER_LEN {
-            Some("it is longer than 128 characters")
+            Some(format!("it is longer than {MAX_USER_LEN} characters"))
         } else if user.chars().any(char::is_whitespace) {
-            Some("it contains whitespace")
+            Some("it contains whitespace".to_owned())
         } else if user.chars().any(char::is_control) {
-            Some("it contains control characters")
+            Some("it contains control characters".to_owned())
+        } else if user.chars().any(is_invisible) {
+            Some("it contains invisible or bidirectional formatting characters".to_owned())
         } else if user.contains("{{") || user.contains("}}") {
-            Some("it contains `{{` or `}}`")
+            Some("it contains `{{` or `}}`".to_owned())
         } else {
             None
         };
         match broken {
             None => Ok(Self(user.to_owned())),
-            Some(rule) => Err(Error::new(ErrorKind::InvalidUser(rule.to_owned()))),
+            Some(rule) => Err(Error::new(ErrorKind::InvalidUser(rule))),
         }
     }
 
@@ -244,6 +261,18 @@ mod tests {
             ("two words", "it contains whitespace"),
             ("tab\there", "it contains whitespace"),
             ("bell\u{7}", "it contains control characters"),
+            (
+                "root\u{200B}",
+                "it contains invisible or bidirectional formatting characters",
+            ),
+            (
+                "root\u{202E}",
+                "it contains invisible or bidirectional formatting characters",
+            ),
+            (
+                "\u{FEFF}root",
+                "it contains invisible or bidirectional formatting characters",
+            ),
             ("{{root}}", "it contains `{{` or `}}`"),
             ("root}}", "it contains `{{` or `}}`"),
         ] {
