@@ -91,7 +91,7 @@ pub fn generate(vault: &Vault, name: &SecretName, options: &GenerateOptions) -> 
         ))));
     }
     let value = random_string(options.length, &options.alphabet.chars())?;
-    vault.store(name, &value, Source::Generated, options.overwrite)
+    vault.store(name, &value, Source::Generated, options.overwrite, None)
 }
 
 #[cfg(test)]

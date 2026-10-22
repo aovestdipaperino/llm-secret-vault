@@ -189,6 +189,7 @@ mod tests {
     fn meta(name: &str) -> Meta {
         Meta {
             name: SecretName::new(name).unwrap(),
+            user: None,
             len: 12,
             fingerprint: "deadbeef".to_owned(),
             source: Source::Generated,
@@ -285,5 +286,31 @@ mod tests {
         }
         assert_eq!(index.list(None), vec![meta("a")]);
         assert_eq!(Index::load(&path).unwrap().list(None), vec![meta("a")]);
+    }
+
+    #[test]
+    fn loads_entries_written_without_user_and_keeps_users() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("index.json");
+        fs::write(
+            &path,
+            r#"{"version":1,"secrets":{"a":{"name":"a","len":12,"fingerprint":"deadbeef","source":"generated","created":1,"rotated":null}}}"#,
+        )
+        .unwrap();
+        let index = Index::load(&path).unwrap();
+        assert_eq!(index.list(None), vec![meta("a")]);
+        index.upsert(meta("b")).unwrap();
+        assert!(!fs::read_to_string(&path).unwrap().contains("\"user\""));
+
+        let with_user = Meta {
+            user: Some(crate::name::SecretUser::new("root").unwrap()),
+            ..meta("c")
+        };
+        index.upsert(with_user.clone()).unwrap();
+        let reloaded = Index::load(&path).unwrap();
+        assert_eq!(
+            reloaded.get(&SecretName::new("c").unwrap()),
+            Some(with_user)
+        );
     }
 }

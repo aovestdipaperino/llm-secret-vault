@@ -74,7 +74,7 @@ mod end_to_end {
         fn run_output_never_contains_the_value(value in "[A-Z0-9]{8,32}", noise in "[a-z ]{0,40}") {
             let vault = Vault::in_memory();
             let name = SecretName::new("prop").unwrap();
-            vault.store(&name, &value, Source::Generated, false).unwrap();
+            vault.store(&name, &value, Source::Generated, false, None).unwrap();
             let script = format!("printf '%s' '{noise}'; printf '%s' \"$S\"; printf '%s' \"$S\" | base64; echo \"$S\" >&2");
             let out = run(&vault, &RunRequest::new(["sh", "-c", script.as_str()]).env("S", name)).unwrap();
             prop_assert!(!out.stdout.contains(&value));

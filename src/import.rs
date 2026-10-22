@@ -42,5 +42,5 @@ pub fn import(vault: &Vault, name: &SecretName, overwrite: bool) -> Result<Meta>
             "the two entries differ".to_owned(),
         )));
     }
-    vault.store(name, &first, Source::Imported, overwrite)
+    vault.store(name, &first, Source::Imported, overwrite, None)
 }

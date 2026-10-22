@@ -16,6 +16,7 @@ fn vault() -> Vault {
             VALUE,
             Source::Clipboard,
             false,
+            None,
         )
         .unwrap();
     vault
@@ -143,7 +144,7 @@ fn periodic_secret_flood_is_bounded_and_redacted() {
     let vault = Vault::in_memory();
     let name = SecretName::new("periodic").unwrap();
     vault
-        .store(&name, "abab", Source::Clipboard, false)
+        .store(&name, "abab", Source::Clipboard, false, None)
         .unwrap();
     let start = Instant::now();
     let req = RunRequest::new(["sh", "-c", "yes abab | tr -d '\\n' | head -c 20000000"])
@@ -174,7 +175,7 @@ fn placeholder_in_program_is_resolved() {
     let vault = Vault::in_memory();
     let tool = SecretName::new("tool").unwrap();
     vault
-        .store(&tool, "/bin/echo", Source::Clipboard, false)
+        .store(&tool, "/bin/echo", Source::Clipboard, false, None)
         .unwrap();
     let out = run(&vault, &RunRequest::new(["{{tool}}", "hi"])).unwrap();
     assert_eq!(out.stdout, "hi\n");
@@ -191,7 +192,13 @@ fn spawn_error_for_program_placeholder_hides_resolved_value() {
     let vault = Vault::in_memory();
     let tool = SecretName::new("tool").unwrap();
     vault
-        .store(&tool, "/no/such/secret-path", Source::Clipboard, false)
+        .store(
+            &tool,
+            "/no/such/secret-path",
+            Source::Clipboard,
+            false,
+            None,
+        )
         .unwrap();
     let err = run(&vault, &RunRequest::new(["{{tool}}"])).unwrap_err();
     assert!(matches!(err.kind(), ErrorKind::Spawn(_)));

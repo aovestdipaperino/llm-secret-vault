@@ -164,7 +164,7 @@ pub fn capture(
     if vault.exists(name) && !options.overwrite {
         return Err(Error::new(ErrorKind::NameExists(name.to_string())));
     }
-    let meta = vault.store(name, &value, Source::Clipboard, options.overwrite)?;
+    let meta = vault.store(name, &value, Source::Clipboard, options.overwrite, None)?;
     let still_there = match clipboard.text() {
         Ok(Some(now)) => Zeroizing::new(now) == original,
         _ => false,
@@ -247,6 +247,7 @@ mod tests {
                 "hf_abcdefghijklmnop",
                 Source::Imported,
                 false,
+                None,
             )
             .unwrap();
         assert_eq!(report.meta.fingerprint, expected.fingerprint);
