@@ -476,3 +476,53 @@ fn run_refuses_nested_lsv() {
     assert!(text.contains("must not start lsv itself"), "{text}");
     assert!(reasons.lock().unwrap().is_empty());
 }
+
+#[test]
+fn capture_with_user_shows_in_list_and_info() {
+    let server = server();
+    let (text, is_error) = tool(
+        &server,
+        "secret_capture",
+        &json!({"name": "nas-root", "user": "root"}),
+    );
+    assert!(!is_error, "{text}");
+    let (list, _) = tool(&server, "secret_list", &json!({"prefix": "nas"}));
+    let list: Value = serde_json::from_str(&list).unwrap();
+    assert_eq!(list[0]["user"], "root");
+    let (info, _) = tool(&server, "secret_info", &json!({"name": "nas-root"}));
+    assert!(info.contains("\"user\": \"root\""), "{info}");
+}
+
+#[test]
+fn generate_with_user_and_without() {
+    let server = server();
+    tool(
+        &server,
+        "secret_generate",
+        &json!({"name": "db-app", "user": "app"}),
+    );
+    tool(&server, "secret_generate", &json!({"name": "db-plain"}));
+    let (info, _) = tool(&server, "secret_info", &json!({"name": "db-app"}));
+    assert!(info.contains("\"user\": \"app\""), "{info}");
+    let (info, _) = tool(&server, "secret_info", &json!({"name": "db-plain"}));
+    assert!(!info.contains("\"user\""), "{info}");
+}
+
+#[test]
+fn invalid_user_stores_nothing() {
+    let server = server();
+    for name in ["secret_capture", "secret_generate"] {
+        let (text, is_error) = tool(
+            &server,
+            name,
+            &json!({"name": "nas-root", "user": "two words"}),
+        );
+        assert!(is_error, "{name}");
+        assert!(
+            text.contains("invalid user: it contains whitespace"),
+            "{text}"
+        );
+    }
+    let (list, _) = tool(&server, "secret_list", &json!({}));
+    assert_eq!(list.trim(), "[]");
+}
