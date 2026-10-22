@@ -33,8 +33,10 @@ command.
   a placeholder if an agent pastes it into an argv). `root`,
   `admin@corp.com` and `CORP\enzo` are valid. Serde goes through `String`
   with `try_from`, like `SecretName`. A failure is a new
-  `ErrorKind::InvalidUser(String)` whose message states which rule failed;
-  the value is shown, since it is not secret.
+  `ErrorKind::InvalidUser(String)` whose payload names the rule that failed
+  and whose message reads `invalid user: <rule>`. The value itself is not
+  echoed, so a stray control character or a very long string cannot mangle
+  the output.
 - `Meta` gains `pub user: Option<SecretUser>` with
   `#[serde(default, skip_serializing_if = "Option::is_none")]`. An existing
   `index.json` without the field loads unchanged and `INDEX_VERSION` stays 1.
