@@ -21,5 +21,5 @@ mod fingerprint;
 mod index;
 
 pub use error::{Error, ErrorKind, Result};
-pub use name::SecretName;
+pub use name::{SecretName, SecretUser};
 pub use vault::{Meta, Source, Vault};
