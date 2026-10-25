@@ -16,8 +16,8 @@ use crate::error::{Error, ErrorKind, Result};
 use crate::generate::{Alphabet, GenerateOptions, generate};
 use crate::hook::{Decision, check_run};
 use crate::inject::{RunRequest, run};
-use crate::name::{SecretName, SecretUser};
-use crate::vault::Vault;
+use crate::name::{SecretHost, SecretName, SecretUser};
+use crate::vault::{Labels, Vault};
 
 const DEFAULT_TIMEOUT_S: u64 = 120;
 const DEFAULT_MAX_OUTPUT_KB: usize = 32;
@@ -47,6 +47,7 @@ struct CaptureArgs {
     #[serde(default)]
     allow_multiline: bool,
     user: Option<String>,
+    host: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -58,6 +59,7 @@ struct GenerateArgs {
     #[serde(default)]
     overwrite: bool,
     user: Option<String>,
+    host: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -101,7 +103,7 @@ pub(super) fn definitions() -> Value {
     json!([
         {
             "name": "secret_list",
-            "description": "List stored secrets: names, users, lengths, fingerprints, sources and dates. Never returns values. One host can have several secrets for different accounts (e.g. nas-root with user root and nas-enzo with user enzo): pick the secret whose user is the login you need and write that user into the command.",
+            "description": "List stored secrets: names, users, hosts, lengths, fingerprints, sources and dates. Never returns values. One host can have several secrets for different accounts (e.g. nas-root with user root and nas-enzo with user enzo): pick the secret whose user is the login you need, then write its user as the login and its host as the address to connect to.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"prefix": {"type": "string", "description": "Only names starting with this prefix."}},
@@ -110,7 +112,7 @@ pub(super) fn definitions() -> Value {
         },
         {
             "name": "secret_info",
-            "description": "Metadata for one secret (user, length, fingerprint, source, dates). Never returns the value.",
+            "description": "Metadata for one secret (user, host, length, fingerprint, source, dates). Never returns the value.",
             "inputSchema": {
                 "type": "object",
                 "properties": {"name": {"type": "string"}},
@@ -129,7 +131,8 @@ pub(super) fn definitions() -> Value {
                     "expect_prefix": {"type": "string", "description": "Reject the capture unless the text starts with this, e.g. hf_ or sk_live_."},
                     "min_len": {"type": "integer", "default": 8},
                     "allow_multiline": {"type": "boolean", "default": false},
-                    "user": {"type": "string", "description": "Account this secret belongs to, e.g. root for the NAS root password. Not secret; shown in secret_list. On overwrite, omitting it keeps the current user."}
+                    "user": {"type": "string", "description": "Account this secret belongs to, e.g. root for the NAS root password. Not secret; shown in secret_list. On overwrite, omitting it keeps the current user."},
+                    "host": {"type": "string", "description": "Where this secret is used: hostname, IP or URL, e.g. 192.168.1.8 for the NAS. Not secret; shown in secret_list. On overwrite, omitting it keeps the current host."}
                 },
                 "required": ["name"],
                 "additionalProperties": false
@@ -145,7 +148,8 @@ pub(super) fn definitions() -> Value {
                     "length": {"type": "integer", "default": 32, "minimum": 8, "maximum": 1024},
                     "alphabet": {"type": "string", "enum": ["alnum", "hex", "base64url", "printable"], "default": "alnum"},
                     "overwrite": {"type": "boolean", "default": false},
-                    "user": {"type": "string", "description": "Account this secret belongs to, e.g. root for the NAS root password. Not secret; shown in secret_list. On overwrite, omitting it keeps the current user."}
+                    "user": {"type": "string", "description": "Account this secret belongs to, e.g. root for the NAS root password. Not secret; shown in secret_list. On overwrite, omitting it keeps the current user."},
+                    "host": {"type": "string", "description": "Where this secret is used: hostname, IP or URL, e.g. 192.168.1.8 for the NAS. Not secret; shown in secret_list. On overwrite, omitting it keeps the current host."}
                 },
                 "required": ["name"],
                 "additionalProperties": false
@@ -168,6 +172,14 @@ pub(super) fn definitions() -> Value {
             }
         }
     ])
+}
+
+/// Validates the optional user and host arguments of a storing tool.
+fn labels(user: Option<String>, host: Option<String>) -> Result<Labels> {
+    Ok(Labels {
+        user: user.map(SecretUser::new).transpose()?,
+        host: host.map(SecretHost::new).transpose()?,
+    })
 }
 
 /// Runs tool `tool` and returns the text for its result.
@@ -195,7 +207,7 @@ pub(super) fn call(
                 expect_prefix: args.expect_prefix,
                 min_len: args.min_len,
                 allow_multiline: args.allow_multiline,
-                user: args.user.map(SecretUser::new).transpose()?,
+                labels: labels(args.user, args.host)?,
             };
             let mut board = clipboard()?;
             let report = capture(vault, board.as_mut(), &name, &options)?;
@@ -217,7 +229,7 @@ pub(super) fn call(
                 length: args.length.unwrap_or(defaults.length),
                 alphabet: args.alphabet.unwrap_or(defaults.alphabet),
                 overwrite: args.overwrite,
-                user: args.user.map(SecretUser::new).transpose()?,
+                labels: labels(args.user, args.host)?,
             };
             let meta = generate(vault, &name, &options)?;
             Ok(format!(

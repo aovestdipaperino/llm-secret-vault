@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::name::{SecretName, SecretUser};
-use crate::vault::{Meta, Source, Vault};
+use crate::name::SecretName;
+use crate::vault::{Labels, Meta, Source, Vault};
 
 /// Shortest generated value.
 pub const MIN_GENERATED_LEN: usize = 8;
@@ -48,8 +48,8 @@ pub struct GenerateOptions {
     pub alphabet: Alphabet,
     /// Replace an existing secret with the same name.
     pub overwrite: bool,
-    /// Account the secret belongs to; on overwrite `None` keeps the current one.
-    pub user: Option<SecretUser>,
+    /// User and host; on overwrite a `None` label keeps the current one.
+    pub labels: Labels,
 }
 
 impl Default for GenerateOptions {
@@ -58,7 +58,7 @@ impl Default for GenerateOptions {
             length: 32,
             alphabet: Alphabet::Alnum,
             overwrite: false,
-            user: None,
+            labels: Labels::default(),
         }
     }
 }
@@ -99,13 +99,14 @@ pub fn generate(vault: &Vault, name: &SecretName, options: &GenerateOptions) -> 
         &value,
         Source::Generated,
         options.overwrite,
-        options.user.as_ref(),
+        &options.labels,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::name::{SecretHost, SecretUser};
 
     #[test]
     fn random_strings_respect_length_and_alphabet() {
@@ -167,14 +168,21 @@ mod tests {
     }
 
     #[test]
-    fn generate_stores_user() {
+    fn generate_stores_labels() {
         let vault = Vault::in_memory();
         let name = SecretName::new("db-app").unwrap();
         let options = GenerateOptions {
-            user: Some(SecretUser::new("app").unwrap()),
+            labels: Labels {
+                user: Some(SecretUser::new("app").unwrap()),
+                host: Some(SecretHost::new("db.internal:5432").unwrap()),
+            },
             ..Default::default()
         };
         let meta = generate(&vault, &name, &options).unwrap();
         assert_eq!(meta.user, Some(SecretUser::new("app").unwrap()));
+        assert_eq!(
+            meta.host,
+            Some(SecretHost::new("db.internal:5432").unwrap())
+        );
     }
 }

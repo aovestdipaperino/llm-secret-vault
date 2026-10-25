@@ -49,11 +49,12 @@ Service provider (such as gnome-keyring) that is running and unlocked.
 
 ```bash
 lsv capture hf-token --expect-prefix hf_     # clipboard -> keyring, clipboard cleared
-lsv capture nas-root --user root             # record which account the password is for
+lsv capture nas-root --user root --host 192.168.1.8   # record the account and where it is used
 lsv user nas-enzo enzo                       # set (or --clear) the user of an existing secret
+lsv host nas-enzo 192.168.1.8                # set (or --clear) the host of an existing secret
 lsv generate db-password --length 40         # random, never shown
 lsv import nas-root                          # hidden prompt, typed twice
-lsv list                                     # names, users, lengths, fingerprints, dates
+lsv list                                     # names, users, hosts, lengths, fingerprints, dates
 lsv run HF_TOKEN=hf-token -- huggingface-cli upload me/model ./weights
 lsv run -- curl -H "Authorization: Bearer {{resend}}" https://api.resend.com/emails
 lsv run --no-touch HF_TOKEN=hf-token -- ./deploy.sh   # skip Touch ID, your terminal only
@@ -71,10 +72,10 @@ cleared, for instance because you copied something else in the meantime.
 
 | Tool | What it does |
 |---|---|
-| `secret_list` | Names and metadata (including each secret's user), optional prefix filter |
+| `secret_list` | Names and metadata (including each secret's user and host), optional prefix filter |
 | `secret_info` | Metadata for one secret |
-| `secret_capture` | Clipboard to keyring, optional `user` and `expect_prefix` check, clears the clipboard |
-| `secret_generate` | Random value, optional `user`, `overwrite: true` rotates |
+| `secret_capture` | Clipboard to keyring, optional `user`, `host` and `expect_prefix` check, clears the clipboard |
+| `secret_generate` | Random value, optional `user` and `host`, `overwrite: true` rotates |
 | `secret_run` | Run an argv with `env` bindings and `{{name}}` placeholders; redacted output |
 
 A secret can record the user it belongs to, so a host with several accounts can hold `nas-root` (user `root`) and `nas-enzo` (user `enzo`) and the agent picks by user. The user is not secret: it is stored in the index, shown by `list` and `info`, and typed into commands by the agent. Overwriting a secret without a user keeps the old one. A user equal to the secret value is refused. No MCP tool relabels a secret on its own: an agent can only change the user by overwriting the value through `secret_capture` or `secret_generate`, while `lsv user` changes it alone from the CLI.
@@ -229,7 +230,7 @@ offline. Storage, encryption and locking are the OS keyring's; on macOS over
 plain SSH the login keychain is locked and `lsv` reports the keyring as
 unavailable.
 
-The metadata index holds names, users, lengths, keyed fingerprints, source and
+The metadata index holds names, users, hosts, lengths, keyed fingerprints, source and
 timestamps, never values. It lives at `dirs::config_dir()/llm-secret-vault/index.json`
 (for example `~/Library/Application Support/llm-secret-vault/index.json` on
 macOS, `~/.config/llm-secret-vault/index.json` on Linux) and is written with

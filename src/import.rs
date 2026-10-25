@@ -5,8 +5,8 @@ use std::io::IsTerminal;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::name::{SecretName, SecretUser};
-use crate::vault::{Meta, Source, Vault};
+use crate::name::SecretName;
+use crate::vault::{Labels, Meta, Source, Vault};
 
 fn prompt(label: &str) -> Result<Zeroizing<String>> {
     rpassword::prompt_password(label)
@@ -21,20 +21,15 @@ fn prompt(label: &str) -> Result<Zeroizing<String>> {
 /// Prompts twice for a value (hidden) and stores it as `name`.
 ///
 /// Refuses to run without a terminal, so a value can never arrive through a
-/// pipe, a file or an agent. `user` is recorded as the account the secret
-/// belongs to; on overwrite `None` keeps the current one.
+/// pipe, a file or an agent. `labels` records the account and host the
+/// secret belongs to; on overwrite a `None` label keeps the current one.
 ///
 /// # Errors
 ///
 /// Returns [`ErrorKind::NoTty`] without a terminal, [`ErrorKind::NameExists`]
 /// if the name exists without `overwrite`, [`ErrorKind::InvalidValue`] if the
 /// two entries differ, and storage errors from [`Vault::store`].
-pub fn import(
-    vault: &Vault,
-    name: &SecretName,
-    overwrite: bool,
-    user: Option<&SecretUser>,
-) -> Result<Meta> {
+pub fn import(vault: &Vault, name: &SecretName, overwrite: bool, labels: &Labels) -> Result<Meta> {
     if !std::io::stdin().is_terminal() {
         return Err(Error::new(ErrorKind::NoTty));
     }
@@ -48,5 +43,5 @@ pub fn import(
             "the two entries differ".to_owned(),
         )));
     }
-    vault.store(name, &first, Source::Imported, overwrite, user)
+    vault.store(name, &first, Source::Imported, overwrite, labels)
 }

@@ -11,7 +11,9 @@ use llm_secret_vault::hook::{Decision, evaluate};
 use llm_secret_vault::import::import;
 use llm_secret_vault::inject::{RunRequest, run};
 use llm_secret_vault::mcp::Server;
-use llm_secret_vault::{Error, ErrorKind, Meta, Result, SecretName, SecretUser, Vault};
+use llm_secret_vault::{
+    Error, ErrorKind, Labels, Meta, Result, SecretHost, SecretName, SecretUser, Vault,
+};
 
 /// Let LLM agents use secrets they can never read.
 #[derive(Debug, Parser)]
@@ -44,6 +46,9 @@ enum Cmd {
         /// Account this secret belongs to, e.g. root.
         #[arg(long)]
         user: Option<String>,
+        /// Where this secret is used, e.g. 192.168.1.8.
+        #[arg(long)]
+        host: Option<String>,
     },
     /// Generate a random secret without showing it.
     Generate {
@@ -57,6 +62,9 @@ enum Cmd {
         /// Account this secret belongs to, e.g. root.
         #[arg(long)]
         user: Option<String>,
+        /// Where this secret is used, e.g. 192.168.1.8.
+        #[arg(long)]
+        host: Option<String>,
     },
     /// Type a secret at a hidden prompt.
     Import {
@@ -66,6 +74,9 @@ enum Cmd {
         /// Account this secret belongs to, e.g. root.
         #[arg(long)]
         user: Option<String>,
+        /// Where this secret is used, e.g. 192.168.1.8.
+        #[arg(long)]
+        host: Option<String>,
     },
     /// Set or clear the user (account) a secret belongs to.
     User {
@@ -74,6 +85,16 @@ enum Cmd {
         #[arg(required_unless_present = "clear", conflicts_with = "clear")]
         user: Option<String>,
         /// Remove the user.
+        #[arg(long)]
+        clear: bool,
+    },
+    /// Set or clear the host a secret is used against.
+    Host {
+        name: String,
+        /// The host, e.g. 192.168.1.8 or `https://nas.local:5001`.
+        #[arg(required_unless_present = "clear", conflicts_with = "clear")]
+        host: Option<String>,
+        /// Remove the host.
         #[arg(long)]
         clear: bool,
     },
@@ -204,6 +225,7 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
             min_len,
             allow_multiline,
             user,
+            host,
         } => {
             let name = SecretName::new(name)?;
             let options = CaptureOptions {
@@ -211,7 +233,7 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
                 expect_prefix,
                 min_len,
                 allow_multiline,
-                user: parse_user(user)?,
+                labels: parse_labels(user, host)?,
             };
             capture_main(&name, &options)
         }
@@ -221,13 +243,14 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
             alphabet,
             overwrite,
             user,
+            host,
         } => {
             let name = SecretName::new(name)?;
             let options = GenerateOptions {
                 length,
                 alphabet,
                 overwrite,
-                user: parse_user(user)?,
+                labels: parse_labels(user, host)?,
             };
             let meta = generate(&Vault::open()?, &name, &options)?;
             println!("stored {name}: {} chars, fp {}", meta.len, meta.fingerprint);
@@ -237,23 +260,16 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
             name,
             overwrite,
             user,
+            host,
         } => {
             let name = SecretName::new(name)?;
-            let user = parse_user(user)?;
-            let meta = import(&Vault::open()?, &name, overwrite, user.as_ref())?;
+            let labels = parse_labels(user, host)?;
+            let meta = import(&Vault::open()?, &name, overwrite, &labels)?;
             println!("stored {name}: {} chars, fp {}", meta.len, meta.fingerprint);
             Ok(ExitCode::SUCCESS)
         }
-        Cmd::User { name, user, .. } => {
-            let name = SecretName::new(name)?;
-            let user = parse_user(user)?;
-            let meta = Vault::open()?.set_user(&name, user.as_ref())?;
-            match &meta.user {
-                Some(user) => println!("{name}: user {user}"),
-                None => println!("{name}: user cleared"),
-            }
-            Ok(ExitCode::SUCCESS)
-        }
+        Cmd::User { name, user, .. } => user_main(name, user),
+        Cmd::Host { name, host, .. } => host_main(name, host),
         Cmd::Run {
             no_touch,
             bindings,
@@ -289,6 +305,28 @@ fn capture_main(name: &SecretName, options: &CaptureOptions) -> Result<ExitCode>
             ", clipboard NOT cleared (clear it manually)"
         }
     );
+    Ok(ExitCode::SUCCESS)
+}
+
+fn user_main(name: String, user: Option<String>) -> Result<ExitCode> {
+    let name = SecretName::new(name)?;
+    let user = user.map(SecretUser::new).transpose()?;
+    let meta = Vault::open()?.set_user(&name, user.as_ref())?;
+    match &meta.user {
+        Some(user) => println!("{name}: user {user}"),
+        None => println!("{name}: user cleared"),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+fn host_main(name: String, host: Option<String>) -> Result<ExitCode> {
+    let name = SecretName::new(name)?;
+    let host = host.map(SecretHost::new).transpose()?;
+    let meta = Vault::open()?.set_host(&name, host.as_ref())?;
+    match &meta.host {
+        Some(host) => println!("{name}: host {host}"),
+        None => println!("{name}: host cleared"),
+    }
     Ok(ExitCode::SUCCESS)
 }
 
@@ -355,8 +393,11 @@ fn usage(why: String) -> Error {
     Error::from_kind(ErrorKind::Usage(why))
 }
 
-fn parse_user(user: Option<String>) -> Result<Option<SecretUser>> {
-    user.map(SecretUser::new).transpose()
+fn parse_labels(user: Option<String>, host: Option<String>) -> Result<Labels> {
+    Ok(Labels {
+        user: user.map(SecretUser::new).transpose()?,
+        host: host.map(SecretHost::new).transpose()?,
+    })
 }
 
 fn print_table(secrets: &[Meta]) {
@@ -365,14 +406,15 @@ fn print_table(secrets: &[Meta]) {
         return;
     }
     println!(
-        "{:<32} {:<16} {:>5}  {:<8}  {:<9}  UPDATED",
-        "NAME", "USER", "LEN", "FP", "SOURCE"
+        "{:<32} {:<16} {:<24} {:>5}  {:<8}  {:<9}  UPDATED",
+        "NAME", "USER", "HOST", "LEN", "FP", "SOURCE"
     );
     for meta in secrets {
         println!(
-            "{:<32} {:<16} {:>5}  {:<8}  {:<9}  {}",
+            "{:<32} {:<16} {:<24} {:>5}  {:<8}  {:<9}  {}",
             meta.name,
             user_label(meta),
+            host_label(meta),
             meta.len,
             meta.fingerprint,
             source_label(meta),
@@ -384,6 +426,7 @@ fn print_table(secrets: &[Meta]) {
 fn print_info(meta: &Meta) {
     println!("name:        {}", meta.name);
     println!("user:        {}", user_label(meta));
+    println!("host:        {}", host_label(meta));
     println!("length:      {}", meta.len);
     println!("fingerprint: {}", meta.fingerprint);
     println!("source:      {}", source_label(meta));
@@ -395,6 +438,10 @@ fn print_info(meta: &Meta) {
 
 fn user_label(meta: &Meta) -> &str {
     meta.user.as_ref().map_or("-", SecretUser::as_str)
+}
+
+fn host_label(meta: &Meta) -> &str {
+    meta.host.as_ref().map_or("-", SecretHost::as_str)
 }
 
 fn source_label(meta: &Meta) -> String {

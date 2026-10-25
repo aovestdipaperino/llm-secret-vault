@@ -6,8 +6,8 @@ use serde::Serialize;
 use zeroize::Zeroizing;
 
 use crate::error::{Error, ErrorKind, Result};
-use crate::name::{SecretName, SecretUser};
-use crate::vault::{Meta, Source, Vault};
+use crate::name::SecretName;
+use crate::vault::{Labels, Meta, Source, Vault};
 
 /// Default minimum length for captured values.
 pub const DEFAULT_MIN_LEN: usize = 8;
@@ -89,8 +89,8 @@ pub struct CaptureOptions {
     pub min_len: Option<usize>,
     /// Accept values containing newlines or longer than [`MAX_SINGLE_LINE_LEN`].
     pub allow_multiline: bool,
-    /// Account the secret belongs to; on overwrite `None` keeps the current one.
-    pub user: Option<SecretUser>,
+    /// User and host; on overwrite a `None` label keeps the current one.
+    pub labels: Labels,
 }
 
 /// Outcome of a successful [`capture`].
@@ -171,7 +171,7 @@ pub fn capture(
         &value,
         Source::Clipboard,
         options.overwrite,
-        options.user.as_ref(),
+        &options.labels,
     )?;
     let still_there = match clipboard.text() {
         Ok(Some(now)) => Zeroizing::new(now) == original,
@@ -188,6 +188,7 @@ pub fn capture(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::name::{SecretHost, SecretUser};
     use crate::{ErrorKind, Source};
 
     #[derive(Debug, Default)]
@@ -255,7 +256,7 @@ mod tests {
                 "hf_abcdefghijklmnop",
                 Source::Imported,
                 false,
-                None,
+                &Labels::default(),
             )
             .unwrap();
         assert_eq!(report.meta.fingerprint, expected.fingerprint);
@@ -397,14 +398,21 @@ mod tests {
     }
 
     #[test]
-    fn stores_user() {
+    fn stores_labels() {
         let vault = Vault::in_memory();
         let mut cb = clip("hunter2-long-enough");
         let options = CaptureOptions {
-            user: Some(SecretUser::new("root").unwrap()),
+            labels: Labels {
+                user: Some(SecretUser::new("root").unwrap()),
+                host: Some(SecretHost::new("192.168.1.8").unwrap()),
+            },
             ..Default::default()
         };
         let report = capture(&vault, &mut cb, &name("nas-root"), &options).unwrap();
         assert_eq!(report.meta.user, Some(SecretUser::new("root").unwrap()));
+        assert_eq!(
+            report.meta.host,
+            Some(SecretHost::new("192.168.1.8").unwrap())
+        );
     }
 }

@@ -62,7 +62,7 @@ nothing for the hook to enforce).
 3. **No values in `lsv`'s own argv, files or logs.** The deliberate exception is
    `{{name}}` placeholders, which put the value in the *child's* argv; this is
    visible in the process table while the child runs and is documented.
-4. **Metadata only.** `list` and `info` expose name, user, length, fingerprint,
+4. **Metadata only.** `list` and `info` expose name, user, host, length, fingerprint,
    source and timestamps. The fingerprint is the first 8 hex chars of
    HMAC-SHA256(value) keyed with a per-installation key, so it cannot be used
    to brute-force short values offline without the key.
@@ -72,7 +72,7 @@ nothing for the hook to enforce).
 | Module | Responsibility | Depends on |
 |---|---|---|
 | `backend` | `pub(crate) trait Backend { put, resolve, delete }`; `KeyringBackend` over the `keyring` crate; `MemoryBackend` for tests. The trait and `resolve` are `pub(crate)`. | keyring |
-| `index` | Names and metadata (including the optional user) in `index.json` under the platform config dir (`dirs`). Never values. Needed because `keyring` cannot enumerate entries on every platform. | serde, dirs |
+| `index` | Names and metadata (including the optional user and host) in `index.json` under the platform config dir (`dirs`). Never values. Needed because `keyring` cannot enumerate entries on every platform. | serde, dirs |
 | `fingerprint` | HMAC key stored as reserved keyring entry `__lsv_hmac_key__`, created on first use. | hmac, sha2, backend |
 | `capture` | Clipboard to backend, then conditional clear. | arboard, backend, index |
 | `generate` | Random value via `getrandom`, chosen length and alphabet, stored blind. | getrandom, backend, index |
@@ -94,8 +94,8 @@ reserved.
 |---|---|---|
 | `secret_list` | `prefix?` | array of metadata records |
 | `secret_info` | `name` | one metadata record |
-| `secret_capture` | `name`, `user?`, `overwrite?=false`, `expect_prefix?`, `min_len?=8`, `allow_multiline?=false` | `stored <name>: <len> chars, fp <fp>, clipboard cleared` |
-| `secret_generate` | `name`, `user?`, `length?=32`, `alphabet?=alnum` (`alnum`, `hex`, `base64url`, `printable`), `overwrite?=false` | `stored <name>: <len> chars, fp <fp>` |
+| `secret_capture` | `name`, `user?`, `host?`, `overwrite?=false`, `expect_prefix?`, `min_len?=8`, `allow_multiline?=false` | `stored <name>: <len> chars, fp <fp>, clipboard cleared` |
+| `secret_generate` | `name`, `user?`, `host?`, `length?=32`, `alphabet?=alnum` (`alnum`, `hex`, `base64url`, `printable`), `overwrite?=false` | `stored <name>: <len> chars, fp <fp>` |
 | `secret_run` | `argv[]`, `env?{VAR: name}`, `cwd?`, `timeout_s?=120` (1..=3600), `max_output_kb?=32` (1..=1024) | `exit_code`, `stdout`, `stderr` (redacted), `truncated`, `timed_out` |
 
 Rotation is `secret_generate` or `secret_capture` with `overwrite: true`.
@@ -113,6 +113,8 @@ unredacted.
 
 A secret's user is optional, non-secret metadata validated by `SecretUser` (1-128 characters, no whitespace, control, invisible or bidirectional formatting characters, no `{{` or `}}`). A user equal to the secret value is refused. Overwrite without a user keeps the existing one. No MCP tool changes it on its own: an agent can only change it by overwriting the value, while `lsv user` changes it alone from the CLI.
 
+A secret's host is optional, non-secret metadata validated by `SecretHost` with the same rules and a 255-character limit. It is free-form (`192.168.1.8`, `nas.local`, `https://nas.local:5001`) and is not parsed. A host equal to the secret value is refused, overwrite without a host keeps the existing one, and only `lsv host` changes it alone. Both labels are display only: no placeholder expands them, so `inject`, `redact` and `hook` ignore them.
+
 The index re-reads `index.json` on every read and before each write, so a
 running MCP server sees secrets added by the CLI. There is no file locking, so
 concurrent writers in different processes can still race in a small window.
@@ -123,10 +125,11 @@ The MCP server negotiates protocol versions 2025-06-18, 2025-03-26 and
 
 ```
 lsv list [prefix]            lsv info <name>
-lsv capture <name> [--user U] [--overwrite] [--expect-prefix P] [--min-len N] [--allow-multiline]
-lsv generate <name> [--user U] [--length N] [--alphabet A] [--overwrite]
-lsv import <name> [--user U] [--overwrite]
+lsv capture <name> [--user U] [--host H] [--overwrite] [--expect-prefix P] [--min-len N] [--allow-multiline]
+lsv generate <name> [--user U] [--host H] [--length N] [--alphabet A] [--overwrite]
+lsv import <name> [--user U] [--host H] [--overwrite]
 lsv user <name> (<user> | --clear)
+lsv host <name> (<host> | --clear)
 lsv run [--no-touch] [VAR=name ...] -- <argv...>
 lsv delete <name>
 lsv mcp                      lsv hook

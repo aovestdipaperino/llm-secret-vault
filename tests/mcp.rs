@@ -527,3 +527,55 @@ fn invalid_user_stores_nothing() {
     let (list, _) = tool(&server, "secret_list", &json!({}));
     assert_eq!(list.trim(), "[]");
 }
+
+#[test]
+fn capture_with_host_shows_in_list_and_info() {
+    let server = server();
+    let (text, is_error) = tool(
+        &server,
+        "secret_capture",
+        &json!({"name": "nas-root", "user": "root", "host": "192.168.1.8"}),
+    );
+    assert!(!is_error, "{text}");
+    let (list, _) = tool(&server, "secret_list", &json!({"prefix": "nas"}));
+    let list: Value = serde_json::from_str(&list).unwrap();
+    assert_eq!(list[0]["user"], "root");
+    assert_eq!(list[0]["host"], "192.168.1.8");
+    let (info, _) = tool(&server, "secret_info", &json!({"name": "nas-root"}));
+    assert!(info.contains("\"host\": \"192.168.1.8\""), "{info}");
+}
+
+#[test]
+fn generate_with_host_and_without() {
+    let server = server();
+    tool(
+        &server,
+        "secret_generate",
+        &json!({"name": "db-app", "host": "db.internal:5432"}),
+    );
+    tool(&server, "secret_generate", &json!({"name": "db-plain"}));
+    let (info, _) = tool(&server, "secret_info", &json!({"name": "db-app"}));
+    assert!(info.contains("\"host\": \"db.internal:5432\""), "{info}");
+    let (info, _) = tool(&server, "secret_info", &json!({"name": "db-plain"}));
+    assert!(!info.contains("\"host\""), "{info}");
+}
+
+#[test]
+fn invalid_host_stores_nothing() {
+    let server = server();
+    for name in ["secret_capture", "secret_generate"] {
+        let (text, is_error) = tool(
+            &server,
+            name,
+            &json!({"name": "nas-root", "host": "nas local"}),
+        );
+        assert!(is_error, "{name}");
+        assert!(
+            text.contains("invalid host: it contains whitespace"),
+            "{text}"
+        );
+        assert!(!text.contains("nas local"), "{text}");
+    }
+    let (list, _) = tool(&server, "secret_list", &json!({}));
+    assert_eq!(list.trim(), "[]");
+}

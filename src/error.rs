@@ -23,6 +23,8 @@ pub enum ErrorKind {
     InvalidName(String),
     /// A secret's user does not match the allowed pattern; the payload names the rule.
     InvalidUser(String),
+    /// A secret's host does not match the allowed pattern; the payload names the rule.
+    InvalidHost(String),
     /// No secret with this name exists.
     UnknownName(String),
     /// A secret with this name exists and overwrite was not requested.
@@ -77,6 +79,7 @@ impl fmt::Display for Error {
                 "invalid secret name `{name}`: use 1-64 characters of a-z, 0-9, '.', '_', '-', starting with a letter or digit"
             ),
             ErrorKind::InvalidUser(why) => write!(f, "invalid user: {why}"),
+            ErrorKind::InvalidHost(why) => write!(f, "invalid host: {why}"),
             ErrorKind::UnknownName(name) => write!(f, "no secret named `{name}`"),
             ErrorKind::NameExists(name) => {
                 write!(

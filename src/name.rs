@@ -107,6 +107,27 @@ fn is_invisible(c: char) -> bool {
     )
 }
 
+/// Returns the first labelling rule `s` breaks, or `None` if it is valid.
+///
+/// Shared by [`SecretUser`] and [`SecretHost`]; the rule never echoes `s`.
+fn broken_label_rule(s: &str, max: usize) -> Option<String> {
+    if s.is_empty() {
+        Some("it is empty".to_owned())
+    } else if s.chars().count() > max {
+        Some(format!("it is longer than {max} characters"))
+    } else if s.chars().any(char::is_whitespace) {
+        Some("it contains whitespace".to_owned())
+    } else if s.chars().any(char::is_control) {
+        Some("it contains control characters".to_owned())
+    } else if s.chars().any(is_invisible) {
+        Some("it contains invisible or bidirectional formatting characters".to_owned())
+    } else if s.contains("{{") || s.contains("}}") {
+        Some("it contains `{{` or `}}`".to_owned())
+    } else {
+        None
+    }
+}
+
 /// The account a secret belongs to, such as `root` or `admin@corp.com`.
 ///
 /// Users are 1-128 characters without whitespace or control characters and
@@ -132,22 +153,7 @@ impl SecretUser {
     /// Returns [`ErrorKind::InvalidUser`] naming the rule `user` breaks.
     pub fn new(user: impl AsRef<str>) -> Result<Self> {
         let user = user.as_ref();
-        let broken = if user.is_empty() {
-            Some("it is empty".to_owned())
-        } else if user.chars().count() > MAX_USER_LEN {
-            Some(format!("it is longer than {MAX_USER_LEN} characters"))
-        } else if user.chars().any(char::is_whitespace) {
-            Some("it contains whitespace".to_owned())
-        } else if user.chars().any(char::is_control) {
-            Some("it contains control characters".to_owned())
-        } else if user.chars().any(is_invisible) {
-            Some("it contains invisible or bidirectional formatting characters".to_owned())
-        } else if user.contains("{{") || user.contains("}}") {
-            Some("it contains `{{` or `}}`".to_owned())
-        } else {
-            None
-        };
-        match broken {
+        match broken_label_rule(user, MAX_USER_LEN) {
             None => Ok(Self(user.to_owned())),
             Some(rule) => Err(Error::new(ErrorKind::InvalidUser(rule))),
         }
@@ -175,6 +181,67 @@ impl From<SecretUser> for String {
 }
 
 impl fmt::Display for SecretUser {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(&self.0)
+    }
+}
+
+/// Maximum length of a secret's host, in characters.
+pub const MAX_HOST_LEN: usize = 255;
+
+/// Where a secret is used, such as `192.168.1.8` or `https://nas.local:5001`.
+///
+/// Hosts are free-form addresses of 1-255 characters without whitespace or
+/// control characters and never contain `{{` or `}}`. A host is not secret.
+///
+/// # Examples
+///
+/// ```
+/// use llm_secret_vault::SecretHost;
+///
+/// assert!(SecretHost::new("192.168.1.8").is_ok());
+/// assert!(SecretHost::new("nas local").is_err());
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct SecretHost(String);
+
+impl SecretHost {
+    /// Validates `host` and wraps it.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::InvalidHost`] naming the rule `host` breaks.
+    pub fn new(host: impl AsRef<str>) -> Result<Self> {
+        let host = host.as_ref();
+        match broken_label_rule(host, MAX_HOST_LEN) {
+            None => Ok(Self(host.to_owned())),
+            Some(rule) => Err(Error::new(ErrorKind::InvalidHost(rule))),
+        }
+    }
+
+    /// Returns the host as a string slice.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SecretHost {
+    type Error = Error;
+
+    fn try_from(value: String) -> Result<Self> {
+        Self::new(value)
+    }
+}
+
+impl From<SecretHost> for String {
+    fn from(host: SecretHost) -> Self {
+        host.0
+    }
+}
+
+impl fmt::Display for SecretHost {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.pad(&self.0)
     }
@@ -293,5 +360,50 @@ mod tests {
         assert_eq!(json, "\"root\"");
         assert_eq!(serde_json::from_str::<SecretUser>(&json).unwrap(), user);
         assert!(serde_json::from_str::<SecretUser>("\"two words\"").is_err());
+    }
+
+    #[test]
+    fn accepts_valid_hosts() {
+        for host in [
+            "192.168.1.8",
+            "nas.local",
+            "[fe80::1]:22",
+            "https://192.168.1.8:5001",
+            &"h".repeat(255),
+        ] {
+            assert_eq!(SecretHost::new(host).unwrap().as_str(), host);
+        }
+    }
+
+    #[test]
+    fn rejects_invalid_hosts() {
+        for (host, rule) in [
+            ("", "it is empty"),
+            (&"h".repeat(256) as &str, "it is longer than 255 characters"),
+            ("nas local", "it contains whitespace"),
+            ("nas\u{7}", "it contains control characters"),
+            (
+                "nas\u{200B}.local",
+                "it contains invisible or bidirectional formatting characters",
+            ),
+            ("{{nas}}", "it contains `{{` or `}}`"),
+        ] {
+            let err = SecretHost::new(host).unwrap_err();
+            assert_eq!(
+                err.kind(),
+                &ErrorKind::InvalidHost(rule.to_owned()),
+                "{host:?}"
+            );
+            assert_eq!(err.to_string(), format!("invalid host: {rule}"));
+        }
+    }
+
+    #[test]
+    fn host_round_trips_through_json() {
+        let host = SecretHost::new("192.168.1.8").unwrap();
+        let json = serde_json::to_string(&host).unwrap();
+        assert_eq!(json, "\"192.168.1.8\"");
+        assert_eq!(serde_json::from_str::<SecretHost>(&json).unwrap(), host);
+        assert!(serde_json::from_str::<SecretHost>("\"a b\"").is_err());
     }
 }

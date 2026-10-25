@@ -30,7 +30,7 @@ fn help_lists_subcommands() {
     let text = String::from_utf8(out.stdout).unwrap();
     for sub in [
         "list", "info", "capture", "generate", "import", "run", "delete", "mcp", "hook", "setup",
-        "user",
+        "user", "host",
     ] {
         assert!(text.contains(sub), "missing {sub}");
     }
@@ -151,6 +151,40 @@ fn invalid_user_is_rejected_before_opening_vault() {
         let err = String::from_utf8(out.stderr).unwrap();
         assert!(
             err.contains("invalid user: it contains whitespace"),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn host_needs_exactly_one_of_value_and_clear() {
+    for (args, wording) in [
+        (&["host", "nas-root"][..], "required"),
+        (
+            &["host", "nas-root", "192.168.1.8", "--clear"][..],
+            "cannot be used with",
+        ),
+    ] {
+        let out = lsv().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(err.contains("Usage:"), "{err}");
+        assert!(err.contains(wording), "{err}");
+    }
+}
+
+#[test]
+fn invalid_host_is_rejected_before_opening_vault() {
+    for args in [
+        &["host", "nas-root", "nas local"][..],
+        &["capture", "nas-root", "--host", "nas local"][..],
+        &["generate", "nas-root", "--host", "nas local"][..],
+    ] {
+        let out = lsv().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        let err = String::from_utf8(out.stderr).unwrap();
+        assert!(
+            err.contains("invalid host: it contains whitespace"),
             "{err}"
         );
     }

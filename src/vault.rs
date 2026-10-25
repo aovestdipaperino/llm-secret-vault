@@ -10,7 +10,7 @@ use crate::backend::{Backend, KeyringBackend, MemoryBackend};
 use crate::error::{Error, ErrorKind, Result};
 use crate::fingerprint::fingerprint;
 use crate::index::Index;
-use crate::name::{SecretName, SecretUser};
+use crate::name::{SecretHost, SecretName, SecretUser};
 
 /// Minimum accepted length of a secret value, in bytes.
 pub const MIN_VALUE_LEN: usize = 4;
@@ -37,6 +37,9 @@ pub struct Meta {
     /// Account the secret belongs to, such as `root`; not secret.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<SecretUser>,
+    /// Where the secret is used, such as `192.168.1.8`; not secret.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<SecretHost>,
     /// Length of the value in characters.
     pub len: usize,
     /// Keyed fingerprint of the value (8 hex characters).
@@ -47,6 +50,18 @@ pub struct Meta {
     pub created: u64,
     /// Unix seconds of the last overwrite, if any.
     pub rotated: Option<u64>,
+}
+
+/// Non-secret labels stored alongside a value.
+///
+/// On an overwrite, a `None` field keeps the existing label and a `Some`
+/// field replaces it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Labels {
+    /// Account the secret belongs to.
+    pub user: Option<SecretUser>,
+    /// Where the secret is used.
+    pub host: Option<SecretHost>,
 }
 
 /// Handle to the secret store; cheap to clone.
@@ -90,11 +105,13 @@ impl Vault {
     /// # Examples
     ///
     /// ```
-    /// use llm_secret_vault::{SecretName, Source, Vault};
+    /// use llm_secret_vault::{Labels, SecretName, Source, Vault};
     ///
     /// let vault = Vault::in_memory();
     /// let name = SecretName::new("demo").unwrap();
-    /// let meta = vault.store(&name, "example-value", Source::Generated, false, None).unwrap();
+    /// let meta = vault
+    ///     .store(&name, "example-value", Source::Generated, false, &Labels::default())
+    ///     .unwrap();
     /// assert_eq!(meta.len, 13);
     /// ```
     #[must_use]
@@ -135,8 +152,8 @@ impl Vault {
 
     /// Stores `value` under `name` and returns its metadata.
     ///
-    /// On an overwrite, `user` replaces the existing user when given and keeps
-    /// it when `None`.
+    /// On an overwrite, each label in `labels` replaces the existing one when
+    /// given and keeps it when `None`.
     ///
     /// The fingerprint is computed before anything is stored. If the index
     /// update fails after the keyring write succeeded, the error is returned
@@ -146,7 +163,8 @@ impl Vault {
     /// # Errors
     ///
     /// Returns [`ErrorKind::InvalidValue`] if the value length is out of range,
-    /// [`ErrorKind::InvalidUser`] if `user` equals `value`,
+    /// [`ErrorKind::InvalidUser`] or [`ErrorKind::InvalidHost`] if the user or
+    /// host equals `value`,
     /// [`ErrorKind::NameExists`] if the name exists and `overwrite` is false,
     /// [`ErrorKind::Keyring`] or [`ErrorKind::Index`] if storage fails.
     ///
@@ -159,7 +177,7 @@ impl Vault {
         value: &str,
         source: Source,
         overwrite: bool,
-        user: Option<&SecretUser>,
+        labels: &Labels,
     ) -> Result<Meta> {
         if value.len() < MIN_VALUE_LEN {
             return Err(Error::new(ErrorKind::InvalidValue(format!(
@@ -173,8 +191,13 @@ impl Vault {
                 value.len()
             ))));
         }
-        if user.is_some_and(|u| u.as_str() == value) {
+        if labels.user.as_ref().is_some_and(|u| u.as_str() == value) {
             return Err(Error::new(ErrorKind::InvalidUser(
+                "it equals the secret value".to_owned(),
+            )));
+        }
+        if labels.host.as_ref().is_some_and(|h| h.as_str() == value) {
+            return Err(Error::new(ErrorKind::InvalidHost(
                 "it equals the secret value".to_owned(),
             )));
         }
@@ -186,12 +209,18 @@ impl Vault {
         let fp = fingerprint(self.inner.backend.as_ref(), value)?;
         self.inner.backend.put(name.as_str(), value)?;
         let now = now_secs();
-        let user = user
-            .cloned()
+        let user = labels
+            .user
+            .clone()
             .or_else(|| existing.as_ref().and_then(|m| m.user.clone()));
+        let host = labels
+            .host
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|m| m.host.clone()));
         let meta = Meta {
             name: name.clone(),
             user,
+            host,
             len: value.chars().count(),
             fingerprint: fp,
             source,
@@ -218,6 +247,26 @@ impl Vault {
         let _guard = self.inner.write_lock.lock().expect("write lock poisoned");
         let mut meta = self.inner.index.get(name).ok_or_else(|| unknown(name))?;
         meta.user = user.cloned();
+        self.inner.index.upsert(meta.clone())?;
+        Ok(meta)
+    }
+
+    /// Sets or clears the host of an existing secret, leaving its value alone.
+    ///
+    /// Length, fingerprint, source and timestamps are unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ErrorKind::UnknownName`] if no such secret exists, or
+    /// [`ErrorKind::Index`] if the index cannot be written.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal write lock is poisoned.
+    pub fn set_host(&self, name: &SecretName, host: Option<&SecretHost>) -> Result<Meta> {
+        let _guard = self.inner.write_lock.lock().expect("write lock poisoned");
+        let mut meta = self.inner.index.get(name).ok_or_else(|| unknown(name))?;
+        meta.host = host.cloned();
         self.inner.index.upsert(meta.clone())?;
         Ok(meta)
     }
@@ -268,6 +317,17 @@ mod tests {
         SecretUser::new(s).unwrap()
     }
 
+    fn host(s: &str) -> SecretHost {
+        SecretHost::new(s).unwrap()
+    }
+
+    fn with_host(s: &str) -> Labels {
+        Labels {
+            host: Some(host(s)),
+            ..Labels::default()
+        }
+    }
+
     #[test]
     fn store_info_list_resolve() {
         let vault = Vault::in_memory();
@@ -277,7 +337,7 @@ mod tests {
                 "hunter2-long",
                 Source::Clipboard,
                 false,
-                None,
+                &Labels::default(),
             )
             .unwrap();
         assert_eq!(meta.len, 12);
@@ -305,7 +365,10 @@ mod tests {
                 "value-12345",
                 Source::Clipboard,
                 false,
-                Some(&user("value-12345")),
+                &Labels {
+                    user: Some(user("value-12345")),
+                    ..Labels::default()
+                },
             )
             .unwrap_err();
         assert_eq!(
@@ -320,15 +383,33 @@ mod tests {
     fn refuses_overwrite_unless_asked() {
         let vault = Vault::in_memory();
         vault
-            .store(&name("k"), "first-value", Source::Generated, false, None)
+            .store(
+                &name("k"),
+                "first-value",
+                Source::Generated,
+                false,
+                &Labels::default(),
+            )
             .unwrap();
         let err = vault
-            .store(&name("k"), "second-value", Source::Generated, false, None)
+            .store(
+                &name("k"),
+                "second-value",
+                Source::Generated,
+                false,
+                &Labels::default(),
+            )
             .unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::NameExists(_)));
         let first = vault.info(&name("k")).unwrap();
         let rotated = vault
-            .store(&name("k"), "second-value", Source::Imported, true, None)
+            .store(
+                &name("k"),
+                "second-value",
+                Source::Imported,
+                true,
+                &Labels::default(),
+            )
             .unwrap();
         assert_eq!(rotated.created, first.created);
         assert!(rotated.rotated.is_some());
@@ -344,14 +425,26 @@ mod tests {
         let vault = Vault::in_memory();
         let marker = "zq9-DISTINCTIVE-marker-7731";
         let err = vault
-            .store(&name("k"), &marker[..3], Source::Imported, false, None)
+            .store(
+                &name("k"),
+                &marker[..3],
+                Source::Imported,
+                false,
+                &Labels::default(),
+            )
             .unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::InvalidValue(_)));
         assert!(!err.to_string().contains(marker));
         let big = "x".repeat(MAX_VALUE_LEN + 1);
         assert!(
             vault
-                .store(&name("k"), &big, Source::Imported, false, None)
+                .store(
+                    &name("k"),
+                    &big,
+                    Source::Imported,
+                    false,
+                    &Labels::default()
+                )
                 .is_err()
         );
     }
@@ -371,7 +464,13 @@ mod tests {
             ErrorKind::UnknownName(_)
         ));
         vault
-            .store(&name("gone"), "value-123", Source::Generated, false, None)
+            .store(
+                &name("gone"),
+                "value-123",
+                Source::Generated,
+                false,
+                &Labels::default(),
+            )
             .unwrap();
         vault.delete(&name("gone")).unwrap();
         assert!(!vault.exists(&name("gone")));
@@ -385,7 +484,13 @@ mod tests {
     fn hmac_key_is_not_listed() {
         let vault = Vault::in_memory();
         vault
-            .store(&name("a"), "value-123", Source::Generated, false, None)
+            .store(
+                &name("a"),
+                "value-123",
+                Source::Generated,
+                false,
+                &Labels::default(),
+            )
             .unwrap();
         assert_eq!(vault.list(None).len(), 1);
         assert!(
@@ -401,7 +506,8 @@ mod tests {
     #[test]
     fn value_length_bounds_are_in_bytes() {
         let vault = Vault::in_memory();
-        let store = |v: &str| vault.store(&name("k"), v, Source::Imported, true, None);
+        let store =
+            |v: &str| vault.store(&name("k"), v, Source::Imported, true, &Labels::default());
         assert!(store(&"x".repeat(MIN_VALUE_LEN)).is_ok());
         assert!(store(&"x".repeat(MIN_VALUE_LEN - 1)).is_err());
         // Two characters but exactly MIN_VALUE_LEN bytes.
@@ -443,7 +549,13 @@ mod tests {
     fn backend_delete_failure_keeps_index_entry() {
         let vault = Vault::with_parts(Box::new(FailingDelete), Index::in_memory());
         vault
-            .store(&name("k"), "value-123", Source::Generated, false, None)
+            .store(
+                &name("k"),
+                "value-123",
+                Source::Generated,
+                false,
+                &Labels::default(),
+            )
             .unwrap();
         let err = vault.delete(&name("k")).unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::Keyring(_)));
@@ -460,12 +572,21 @@ mod tests {
                 "first-value",
                 Source::Imported,
                 false,
-                Some(&user("root")),
+                &Labels {
+                    user: Some(user("root")),
+                    ..Labels::default()
+                },
             )
             .unwrap();
         assert_eq!(stored.user, Some(user("root")));
         let kept = vault
-            .store(&k, "second-value", Source::Generated, true, None)
+            .store(
+                &k,
+                "second-value",
+                Source::Generated,
+                true,
+                &Labels::default(),
+            )
             .unwrap();
         assert_eq!(kept.user, Some(user("root")));
         let replaced = vault
@@ -474,7 +595,10 @@ mod tests {
                 "third-value",
                 Source::Generated,
                 true,
-                Some(&user("admin")),
+                &Labels {
+                    user: Some(user("admin")),
+                    ..Labels::default()
+                },
             )
             .unwrap();
         assert_eq!(replaced.user, Some(user("admin")));
@@ -486,7 +610,7 @@ mod tests {
         let vault = Vault::in_memory();
         let k = name("nas-enzo");
         let before = vault
-            .store(&k, "value-123", Source::Imported, false, None)
+            .store(&k, "value-123", Source::Imported, false, &Labels::default())
             .unwrap();
         assert_eq!(before.user, None);
         let after = vault.set_user(&k, Some(&user("enzo"))).unwrap();
@@ -510,6 +634,98 @@ mod tests {
         let vault = Vault::in_memory();
         let err = vault
             .set_user(&name("nope"), Some(&user("root")))
+            .unwrap_err();
+        assert!(matches!(err.kind(), ErrorKind::UnknownName(_)));
+    }
+
+    #[test]
+    fn refuses_host_equal_to_value() {
+        let vault = Vault::in_memory();
+        let err = vault
+            .store(
+                &name("k"),
+                "value-12345",
+                Source::Clipboard,
+                false,
+                &with_host("value-12345"),
+            )
+            .unwrap_err();
+        assert_eq!(
+            err.kind(),
+            &ErrorKind::InvalidHost("it equals the secret value".to_owned())
+        );
+        assert!(!err.to_string().contains("value-12345"));
+        assert!(!vault.exists(&name("k")));
+    }
+
+    #[test]
+    fn overwrite_keeps_or_replaces_each_label() {
+        let vault = Vault::in_memory();
+        let k = name("nas-root");
+        let both = Labels {
+            user: Some(user("root")),
+            host: Some(host("192.168.1.8")),
+        };
+        vault
+            .store(&k, "first-value", Source::Imported, false, &both)
+            .unwrap();
+        let kept = vault
+            .store(
+                &k,
+                "second-value",
+                Source::Generated,
+                true,
+                &Labels::default(),
+            )
+            .unwrap();
+        assert_eq!((kept.user, kept.host), (both.user.clone(), both.host));
+        let moved = vault
+            .store(
+                &k,
+                "third-value",
+                Source::Generated,
+                true,
+                &with_host("nas.local"),
+            )
+            .unwrap();
+        assert_eq!(moved.user, both.user);
+        assert_eq!(moved.host, Some(host("nas.local")));
+        assert_eq!(vault.info(&k).unwrap(), moved);
+    }
+
+    #[test]
+    fn set_host_changes_only_the_host() {
+        let vault = Vault::in_memory();
+        let k = name("nas-enzo");
+        let before = vault
+            .store(
+                &k,
+                "value-123",
+                Source::Imported,
+                false,
+                &Labels {
+                    user: Some(user("enzo")),
+                    ..Labels::default()
+                },
+            )
+            .unwrap();
+        let after = vault.set_host(&k, Some(&host("192.168.1.8"))).unwrap();
+        assert_eq!(
+            after,
+            Meta {
+                host: Some(host("192.168.1.8")),
+                ..before.clone()
+            }
+        );
+        assert_eq!(vault.info(&k).unwrap(), after);
+        assert_eq!(vault.set_host(&k, None).unwrap(), before);
+    }
+
+    #[test]
+    fn set_host_of_unknown_name_fails() {
+        let vault = Vault::in_memory();
+        let err = vault
+            .set_host(&name("nope"), Some(&host("192.168.1.8")))
             .unwrap_err();
         assert!(matches!(err.kind(), ErrorKind::UnknownName(_)));
     }

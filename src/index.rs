@@ -190,6 +190,7 @@ mod tests {
         Meta {
             name: SecretName::new(name).unwrap(),
             user: None,
+            host: None,
             len: 12,
             fingerprint: "deadbeef".to_owned(),
             source: Source::Generated,
@@ -289,7 +290,7 @@ mod tests {
     }
 
     #[test]
-    fn loads_entries_written_without_user_and_keeps_users() {
+    fn loads_entries_written_without_labels_and_keeps_labels() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("index.json");
         fs::write(
@@ -300,17 +301,17 @@ mod tests {
         let index = Index::load(&path).unwrap();
         assert_eq!(index.list(None), vec![meta("a")]);
         index.upsert(meta("b")).unwrap();
-        assert!(!fs::read_to_string(&path).unwrap().contains("\"user\""));
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(!text.contains("\"user\""));
+        assert!(!text.contains("\"host\""));
 
-        let with_user = Meta {
+        let labelled = Meta {
             user: Some(crate::name::SecretUser::new("root").unwrap()),
+            host: Some(crate::name::SecretHost::new("192.168.1.8").unwrap()),
             ..meta("c")
         };
-        index.upsert(with_user.clone()).unwrap();
+        index.upsert(labelled.clone()).unwrap();
         let reloaded = Index::load(&path).unwrap();
-        assert_eq!(
-            reloaded.get(&SecretName::new("c").unwrap()),
-            Some(with_user)
-        );
+        assert_eq!(reloaded.get(&SecretName::new("c").unwrap()), Some(labelled));
     }
 }
