@@ -20,18 +20,19 @@ values. The agent can capture a secret from your clipboard, generate a new
 one, rotate it, and run commands with it. No operation returns a value, and
 command output is redacted before the agent sees it.
 
+Read the story behind the original design in [The Key Is in the Clipboard](https://pub.towardsai.net/the-key-is-in-the-clipboard-f374fd0be86e).
+
 ```text
 you    the NAS root password is in the clipboard, save it as nas-root and back up /data
 
 agent  -> secret_capture(name="nas-root")
        <- stored nas-root: 18 chars, fp 3a9c01e2, clipboard cleared
-agent  -> secret_run(argv=["sshpass","-e","ssh","root@nas","tar czf /backup/data.tgz /data"], env={"SSHPASS":"nas-root"})
+agent  -> bash("lsv run SSHPASS=nas-root -- sshpass -e ssh root@nas 'tar czf /backup/data.tgz /data'")
        <- exit 0
 ```
 
-`lsv run` and `secret_run` return text. Binary stdout is decoded lossily, so
-write binary output to a file (as above) instead of streaming it through the
-tool.
+`lsv run` returns text. Binary stdout is decoded lossily, so write binary
+output to a file (as above) instead of streaming it through the tool.
 
 ## Install
 
@@ -76,18 +77,22 @@ cleared, for instance because you copied something else in the meantime.
 | `secret_info` | Metadata for one secret |
 | `secret_capture` | Clipboard to keyring, optional `user`, `host` and `expect_prefix` check, clears the clipboard |
 | `secret_generate` | Random value, optional `user` and `host`, `overwrite: true` rotates |
-| `secret_run` | Run an argv with `env` bindings and `{{name}}` placeholders; redacted output |
+
+The MCP server manages secrets but never executes commands. To use a secret,
+the agent invokes `lsv run` through the host's normal shell tool (`Bash` in
+Claude Code, `bash` in plank), so the host's hook and execution policy cover
+`lsv` and its child, including its sandbox when enabled. The server
+instructions tell the agent to use this path.
 
 A secret can record the user it belongs to, so a host with several accounts can hold `nas-root` (user `root`) and `nas-enzo` (user `enzo`) and the agent picks by user. The user is not secret: it is stored in the index, shown by `list` and `info`, and typed into commands by the agent. Overwriting a secret without a user keeps the old one. A user equal to the secret value is refused. No MCP tool relabels a secret on its own: an agent can only change the user by overwriting the value through `secret_capture` or `secret_generate`, while `lsv user` changes it alone from the CLI.
 
-`secret_run` takes `timeout_s` from 1 to 3600 (default 120) and
-`max_output_kb` from 1 to 1024 (default 32). When the timeout expires the
-whole process group is killed, including background processes the command
-left behind. The output cap also limits the raw bytes fed to the redactor, and
-when output is truncated whatever is still pending is dropped rather than
-flushed unredacted. Placeholders are substituted in every argv element,
-including the program name, and any `{{word}}` whose inner text is a valid
-secret name counts as a reference; there is no escape syntax.
+`lsv run` uses a 120-second timeout and a 32 KiB output cap. When the timeout
+expires the whole process group is killed, including background processes the
+command left behind. The output cap also limits the raw bytes fed to the
+redactor, and when output is truncated whatever is still pending is dropped
+rather than flushed unredacted. Placeholders are substituted in every argv
+element, including the program name, and any `{{word}}` whose inner text is a
+valid secret name counts as a reference; there is no escape syntax.
 
 There is deliberately no delete tool: only you can delete, from the CLI. The
 server speaks MCP protocol versions 2025-06-18, 2025-03-26 and 2024-11-05 and
@@ -106,11 +111,7 @@ stderr when it matters.
 
 `lsv hook` is a `PreToolUse` hook for the shell tool only (`Bash` in Claude
 Code, `bash` in plank). It blocks by exiting 2 with the reason on stderr,
-which both hosts show to the model. The argv of an MCP `secret_run` call,
-which the hook never sees, is checked by the same rules inside the server
-before anything is resolved; a match fails the call with
-`refused by llm-secret-vault: <reason>` and nothing is spawned. The hook
-analyses every
+which both hosts show to the model. The hook analyses every
 `lsv run` in a command line (including `lsv` invoked by path) and blocks
 children that echo or encode an injected variable or dump the environment
 (`printenv`, `env` with only options, bare `set`, `export`, `export -p`).
@@ -124,12 +125,8 @@ the terminal are refused, and so is any target under `/dev/` other than
 
 Two rules protect Touch ID approval. Any command containing `--no-touch` is
 refused (`--no-touch skips Touch ID and is for your own terminal only`), and
-so is any command that mentions `LSV_TOUCH_ID`, which covers
-`LSV_TOUCH_ID_TTL`, `export`, `unset` and `env -u`
-(`changing LSV_TOUCH_ID would bypass Touch ID approval`). Inside the MCP
-server, a `secret_run` argv that starts `lsv` itself is refused
-(`secret_run must not start lsv itself`), as is one that mentions
-`LSV_TOUCH_ID`.
+so is any command that mentions `LSV_TOUCH_ID`, including `export`, `unset`
+and `env -u` (`changing LSV_TOUCH_ID would bypass Touch ID approval`).
 
 The hook is a heuristic over shell text, and its quote stripping is
 approximate. Known gaps: any redirect of stdout to a file counts as hiding
@@ -142,57 +139,35 @@ and prints a warning, so it can never wedge your session.
 
 ## Touch ID
 
-On macOS every use of a secret asks for your fingerprint by default, both MCP
-`secret_run` calls and `lsv run` from the command line. The `LSV_TOUCH_ID`
-variable can change that: `all` (the default) asks everywhere, `mcp` asks for
-MCP `secret_run` calls only, and `off` never asks. Nothing is asked for
-commands that use no secrets, and a malformed request (empty argv, invalid
-environment variable name) or an unknown secret name fails before any prompt
-appears.
+On macOS every `lsv run` that references secrets asks for your fingerprint by
+default. `LSV_TOUCH_ID=all` is the default; `off` disables this check. The old
+`mcp` value is rejected with `LSV_TOUCH_ID must be off or all`. Nothing is
+asked for commands that use no secrets, and a malformed request or unknown
+secret name fails before any prompt appears.
 
 At your own terminal you can skip the prompt for one run with
 `lsv run --no-touch VAR=name -- program`. That flag is for you, not for the
-agent: the guard hook refuses any agent command that uses it, and any command
-that mentions `LSV_TOUCH_ID`, so the agent cannot switch approval off. This
-protection assumes the guard hook is installed; without it an agent could run
-`lsv run --no-touch` through its shell tool.
+agent: the guard hook refuses any agent command that uses it or mentions
+`LSV_TOUCH_ID`, so the agent cannot switch approval off. This protection
+assumes the guard hook is installed.
 
 The prompt's reason reads `run "<command>" with secrets <names>`, where the
 command is the argv joined with spaces, cut to 80 characters plus `…` when
 longer, and the names are listed in alphabetical order. Placeholders appear
-as `{{name}}`, never expanded, so no secret value is ever shown. You can use
-your login password instead of a finger at any time. Cancelling or failing
-the prompt refuses the run with `Touch ID approval was denied or cancelled`,
-and the command is not started. A prompt left unanswered for two minutes is
-dismissed and counts as a refusal.
+as `{{name}}`, never expanded, so no secret value is shown. You can use your
+login password instead of a finger. Cancelling or failing the prompt refuses
+the run with `Touch ID approval was denied or cancelled`, and the command is
+not started. A prompt left unanswered for two minutes is dismissed and counts
+as a refusal.
 
-After a successful approval the MCP server does not ask again for the same
-secrets for `LSV_TOUCH_ID_TTL` seconds (default 300, maximum 3600; `0` asks
-every time). Approvals are remembered per secret name: a run that adds a
-secret not approved within the TTL asks again. They live in the long-running
-server process only, so each `lsv run` from the shell is its own process and
-asks every time unless you pass `--no-touch`. Every LocalAuthentication
-failure (wrong finger, cancel, timeout, no biometrics) shows the same
-denial message.
+Each CLI invocation is a fresh process with no approval cache, so it asks
+every time unless you pass `--no-touch`. `LSV_TOUCH_ID_TTL` belonged to the
+removed MCP executor and has no effect. Every LocalAuthentication failure
+(wrong finger, cancel, timeout, no biometrics) shows the same denial message.
 
-The MCP server reads these variables from its own environment, so set them
-where the server is registered. For Claude Code:
-
-```bash
-claude mcp add --scope user llm-secret-vault -e LSV_TOUCH_ID_TTL=600 -- lsv mcp
-```
-
-For plank, add an `env` key to the entry in `.mcp.json`:
-
-```json
-"llm-secret-vault": {
-  "command": "lsv",
-  "args": ["mcp"],
-  "env": { "LSV_TOUCH_ID_TTL": "600" }
-}
-```
-
-On other platforms there is no fingerprint check: `lsv` prints a notice and
+The MCP server does not execute commands or consult these settings. For an
+agent run, `lsv run` reads the environment the host gives its shell tool. On
+other platforms there is no fingerprint check: `lsv` prints a notice and
 continues without it.
 
 Touch ID is a separate check and does not replace the Keychain password
@@ -200,16 +175,18 @@ dialog. Gating the Keychain item itself on biometrics needs the
 data-protection keychain and an access control, which only a binary signed
 with a Developer ID and the right entitlements can use, and a `cargo install`
 build has neither. For the same reason "Always Allow" in the Keychain dialog
-is tied to the exact binary, so macOS asks again after every rebuild or
+is tied to the exact binary, so macOS asks again after each rebuild or
 upgrade of `lsv`.
 
 ## Threat model
 
-`lsv` prevents accidents. It keeps secrets out of an agent's context when the
-agent is behaving normally, and it makes a leak require deliberate effort. It
-is not a defense against a hostile agent: a child process receives the real
-value and can transform it in ways no redactor recognizes, and the hook only
-catches the common tricks. Treat it as a seatbelt, not a sandbox.
+`lsv` prevents accidental secret disclosure and adds no execution path of its
+own for the agent: the MCP server only manages secrets, while `lsv run` goes
+through the host's shell hook and sandbox. That containment depends on the
+host configuration; `lsv` is not a sandbox itself. It is not a defense
+against a hostile secret-bearing child: the child receives the real value and
+can transform or transmit it in ways no redactor recognizes, and the hook
+only catches common tricks.
 
 Within that scope, some specifics are worth knowing. Redaction covers the raw
 value, base64 (standard and URL-safe, padded and unpadded, including the

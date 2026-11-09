@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use llm_secret_vault::approve::{self, Context};
+use llm_secret_vault::approve;
 use llm_secret_vault::capture::{CaptureOptions, SystemClipboard, capture};
 use llm_secret_vault::generate::{Alphabet, GenerateOptions, generate};
 use llm_secret_vault::hook::{Decision, evaluate};
@@ -112,7 +112,7 @@ enum Cmd {
     },
     /// Delete a secret.
     Delete { name: String },
-    /// Serve MCP over stdio (launched by Claude Code).
+    /// Serve management-only MCP over stdio (launched by the host).
     Mcp,
     /// `PreToolUse` guard for Claude Code and plank; reads hook JSON on stdin.
     Hook,
@@ -151,11 +151,13 @@ const SETUP_CLAUDE: &str = r#"1. Register the MCP server:
 3. Next time a secret is on your clipboard, tell Claude its name, e.g.
    "the NAS root password is in the clipboard, save it as nas-root".
 
-On macOS every secret use asks for Touch ID by default. The MCP server
-reuses an approval for the same secrets for LSV_TOUCH_ID_TTL seconds
-(default 300); each `lsv run` from your terminal asks every time unless you
-pass `--no-touch`. The guard hook stops Claude from using `--no-touch` or
-changing LSV_TOUCH_ID, so this protection assumes the hook is installed.
+The MCP server only manages secrets. Claude uses `lsv run` through its Bash
+tool, so the guard hook and host sandbox cover the command and its child.
+
+On macOS each `lsv run` with secrets asks for Touch ID by default unless you
+pass `--no-touch` at your own terminal. The guard hook stops Claude from using
+`--no-touch` or changing LSV_TOUCH_ID, so this protection assumes the hook is
+installed.
 "#;
 
 const SETUP_PLANK: &str = r#"1. Register the MCP server in ~/.plank/.mcp.json (merge with existing "mcpServers"):
@@ -179,11 +181,13 @@ const SETUP_PLANK: &str = r#"1. Register the MCP server in ~/.plank/.mcp.json (m
 
 3. Restart plank; /hooks should list the guard.
 
-On macOS every secret use asks for Touch ID by default. The MCP server
-reuses an approval for the same secrets for LSV_TOUCH_ID_TTL seconds
-(default 300); each `lsv run` from your terminal asks every time unless you
-pass `--no-touch`. The guard hook stops plank from using `--no-touch` or
-changing LSV_TOUCH_ID, so this protection assumes the hook is installed.
+The MCP server only manages secrets. Plank uses `lsv run` through its bash
+tool, so the guard hook and host sandbox cover the command and its child.
+
+On macOS each `lsv run` with secrets asks for Touch ID by default unless you
+pass `--no-touch` at your own terminal. The guard hook stops plank from using
+`--no-touch` or changing LSV_TOUCH_ID, so this protection assumes the hook is
+installed.
 "#;
 
 fn main() -> ExitCode {
@@ -282,9 +286,7 @@ fn dispatch(command: Cmd) -> Result<ExitCode> {
             Ok(ExitCode::SUCCESS)
         }
         Cmd::Mcp => {
-            let server = Server::with_system_clipboard(Vault::open()?)
-                .with_approver(approve::from_env(Context::Mcp)?);
-            server
+            Server::with_system_clipboard(Vault::open()?)
                 .serve(std::io::stdin().lock(), std::io::stdout().lock())
                 .map_err(|e| Error::from_io("MCP transport", &e))?;
             Ok(ExitCode::SUCCESS)
@@ -349,7 +351,7 @@ fn run_main(bindings: &[String], argv: Vec<String>, no_touch: bool) -> Result<Ex
             vault.info(name)?;
         }
         if !no_touch {
-            approve::from_env(Context::Cli)?.approve(&approve::run_reason(&request), &names)?;
+            approve::from_env()?.approve(&approve::run_reason(&request), &names)?;
         }
     }
     let output = run(&vault, &request)?;

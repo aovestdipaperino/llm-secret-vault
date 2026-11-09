@@ -1,6 +1,6 @@
 //! Guard hook rule table.
 
-use llm_secret_vault::hook::{Decision, check_command, check_run, evaluate};
+use llm_secret_vault::hook::{Decision, check_command, evaluate};
 
 const DENY: &[&str] = &[
     "security find-generic-password -s foo -w",
@@ -132,97 +132,4 @@ fn deny_reasons_name_the_rule() {
         reason("export LSV_TOUCH_ID=off"),
         "changing LSV_TOUCH_ID would bypass Touch ID approval"
     );
-    let run = argv(&[
-        "lsv",
-        "run",
-        "T=resend",
-        "--",
-        "sh",
-        "-c",
-        "printf %s $T | base64",
-    ]);
-    assert_eq!(
-        check_run(&run, &[]),
-        Decision::Deny("secret_run must not start lsv itself".to_owned())
-    );
-}
-
-fn argv(parts: &[&str]) -> Vec<String> {
-    parts.iter().map(|p| (*p).to_owned()).collect()
-}
-
-#[test]
-fn check_run_denies_leaky_argv() {
-    let cases: &[(&[&str], &[&str])] = &[
-        (&["sh", "-c", "printf %s $T | base64"], &["T"]),
-        (&["sh", "-c", "echo $T"], &["T"]),
-        (&["printenv"], &["T"]),
-        (&["env"], &["T"]),
-        (&["echo", "{{tok}}"], &[]),
-        (&["security", "find-generic-password", "-s", "x", "-w"], &[]),
-        (&["sh", "-c", "echo ${T} | xxd"], &["T"]),
-        (&["sh", "-c", "echo $T >/dev/stderr"], &["T"]),
-        (&["sh", "-c", "echo $T 1>&2"], &["T"]),
-        (&["sh", "-c", "printf %s $T > /dev/stdout"], &["T"]),
-        (
-            &[
-                "lsv",
-                "run",
-                "T=resend",
-                "--",
-                "sh",
-                "-c",
-                "printf %s $T | base64",
-            ],
-            &[],
-        ),
-        (&["/usr/local/bin/lsv", "list"], &[]),
-        (
-            &["sh", "-c", "lsv run --no-touch T=x -- curl https://x"],
-            &[],
-        ),
-        (&["sh", "-c", "./target/release/lsv run T=x -- true"], &[]),
-        (&["env", "LSV_TOUCH_ID=off", "true"], &[]),
-        (&["true"], &["LSV_TOUCH_ID"]),
-        (&["sh", "-c", "/bin/echo $T"], &["T"]),
-        (&["sh", "-c", "echo $T > /dev/pts/0"], &["T"]),
-        (&["sh", "-c", "echo $T >/proc/self/fd/1"], &["T"]),
-        (&["bash", "-c", "echo $T > >(cat)"], &["T"]),
-    ];
-    for (parts, vars) in cases {
-        assert!(
-            matches!(check_run(&argv(parts), vars), Decision::Deny(_)),
-            "should deny: {parts:?}"
-        );
-    }
-}
-
-#[test]
-fn check_run_allows_normal_argv() {
-    let cases: &[(&[&str], &[&str])] = &[
-        (
-            &["curl", "-H", "Authorization: Bearer {{tok}}", "https://x"],
-            &[],
-        ),
-        (
-            &[
-                "sh",
-                "-c",
-                "printf %s \"$T\" | docker login --password-stdin",
-            ],
-            &["T"],
-        ),
-        (&["sshpass", "-e", "ssh", "root@nas"], &["PW"]),
-        (&["sh", "-c", "echo $T > f"], &["T"]),
-        (&["ls"], &[]),
-        (&["sh", "-c", "echo $T > /dev/null"], &["T"]),
-        (&["curl", "https://lsv.example.com"], &[]),
-    ];
-    for (parts, vars) in cases {
-        assert_eq!(
-            check_run(&argv(parts), vars),
-            Decision::Allow,
-            "should allow: {parts:?}"
-        );
-    }
 }

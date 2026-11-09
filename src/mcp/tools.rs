@@ -1,28 +1,15 @@
 //! Tool definitions and dispatch for the MCP server.
 
-use std::collections::BTreeMap;
-use std::ops::RangeInclusive;
-use std::path::PathBuf;
-use std::time::Duration;
-
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
 
 use super::ClipboardFactory;
-use crate::approve::{self, Approver};
 use crate::capture::{CaptureOptions, capture};
 use crate::error::{Error, ErrorKind, Result};
 use crate::generate::{Alphabet, GenerateOptions, generate};
-use crate::hook::{Decision, check_run};
-use crate::inject::{RunRequest, run};
 use crate::name::{SecretHost, SecretName, SecretUser};
 use crate::vault::{Labels, Vault};
-
-const DEFAULT_TIMEOUT_S: u64 = 120;
-const DEFAULT_MAX_OUTPUT_KB: usize = 32;
-const TIMEOUT_RANGE_S: RangeInclusive<u64> = 1..=3600;
-const OUTPUT_RANGE_KB: RangeInclusive<usize> = 1..=1024;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,36 +49,9 @@ struct GenerateArgs {
     host: Option<String>,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct RunArgs {
-    argv: Vec<String>,
-    #[serde(default)]
-    env: BTreeMap<String, String>,
-    cwd: Option<PathBuf>,
-    timeout_s: Option<u64>,
-    max_output_kb: Option<usize>,
-}
-
 fn parse<T: DeserializeOwned>(args: &Value) -> Result<T> {
     T::deserialize(args)
         .map_err(|e| Error::new(ErrorKind::Usage(format!("invalid arguments: {e}"))))
-}
-
-fn bounded<T>(field: &str, value: Option<T>, default: T, range: &RangeInclusive<T>) -> Result<T>
-where
-    T: PartialOrd + Copy + std::fmt::Display,
-{
-    let value = value.unwrap_or(default);
-    if range.contains(&value) {
-        Ok(value)
-    } else {
-        Err(Error::new(ErrorKind::Usage(format!(
-            "{field} must be between {} and {}",
-            range.start(),
-            range.end()
-        ))))
-    }
 }
 
 fn pretty(value: &impl serde::Serialize) -> Result<String> {
@@ -154,22 +114,6 @@ pub(super) fn definitions() -> Value {
                 "required": ["name"],
                 "additionalProperties": false
             }
-        },
-        {
-            "name": "secret_run",
-            "description": "Run a command with secrets injected. Map env var names to secret names in `env`, or write {{secret-name}} inside any argv element, including the program. stdout/stderr come back with secret values replaced by «redacted:name». Do not try to print secrets. If a run is refused or approval is denied, do not retry; ask the user.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "description": "Program and arguments; no shell unless you call one."},
-                    "env": {"type": "object", "additionalProperties": {"type": "string"}, "description": "ENV_VAR -> secret name."},
-                    "cwd": {"type": "string"},
-                    "timeout_s": {"type": "integer", "default": DEFAULT_TIMEOUT_S, "minimum": 1, "maximum": 3600},
-                    "max_output_kb": {"type": "integer", "default": DEFAULT_MAX_OUTPUT_KB, "minimum": 1, "maximum": 1024}
-                },
-                "required": ["argv"],
-                "additionalProperties": false
-            }
         }
     ])
 }
@@ -186,7 +130,6 @@ fn labels(user: Option<String>, host: Option<String>) -> Result<Labels> {
 pub(super) fn call(
     vault: &Vault,
     clipboard: &ClipboardFactory,
-    approver: &dyn Approver,
     tool: &str,
     args: &Value,
 ) -> Result<String> {
@@ -237,46 +180,7 @@ pub(super) fn call(
                 meta.len, meta.fingerprint
             ))
         }
-        "secret_run" => {
-            let args: RunArgs = parse(args)?;
-            let timeout_s = bounded(
-                "timeout_s",
-                args.timeout_s,
-                DEFAULT_TIMEOUT_S,
-                &TIMEOUT_RANGE_S,
-            )?;
-            let output_kb = bounded(
-                "max_output_kb",
-                args.max_output_kb,
-                DEFAULT_MAX_OUTPUT_KB,
-                &OUTPUT_RANGE_KB,
-            )?;
-            let vars: Vec<&str> = args.env.keys().map(String::as_str).collect();
-            if let Decision::Deny(reason) = check_run(&args.argv, &vars) {
-                return Err(Error::new(ErrorKind::Denied(format!(
-                    "refused by llm-secret-vault: {reason}"
-                ))));
-            }
-            let mut request = RunRequest::new(args.argv)
-                .timeout(Duration::from_secs(timeout_s))
-                .max_output_bytes(output_kb.saturating_mul(1024));
-            for (var, secret) in args.env {
-                request = request.env(var, SecretName::new(secret)?);
-            }
-            if let Some(dir) = args.cwd {
-                request = request.cwd(dir);
-            }
-            request.validate()?;
-            let names = request.secret_names();
-            if !names.is_empty() {
-                // Fail on unknown names before showing a prompt.
-                for name in &names {
-                    vault.info(name)?;
-                }
-                approver.approve(&approve::run_reason(&request), &names)?;
-            }
-            pretty(&run(vault, &request)?)
-        }
+
         other => Err(Error::new(ErrorKind::Usage(format!(
             "unknown tool `{other}`"
         )))),

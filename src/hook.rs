@@ -51,9 +51,7 @@ static DIRECT_READS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
 
 static LSV_RUN: LazyLock<Regex> =
     LazyLock::new(|| regex(r#"(?:^|[\s;&|("'`])(?:[^\s;&|()]*/)?lsv\s+run\b"#));
-/// Any invocation of `lsv` (bare or by path) as a command word.
-static LSV_INVOKE: LazyLock<Regex> =
-    LazyLock::new(|| regex(r#"(?:^|[\s;&|("'`])(?:[^\s;&|()]*/)?lsv(?:\s|$)"#));
+
 /// The `--no-touch` flag of `lsv run`, as a word of its own.
 static NO_TOUCH: LazyLock<Regex> = LazyLock::new(|| regex(r"(?:^|\s)--no-touch(?:[\s=]|$)"));
 static DOUBLE_DASH: LazyLock<Regex> = LazyLock::new(|| regex(r"\s--(\s|$)"));
@@ -150,7 +148,6 @@ fn reaches_agent(segment: &str) -> bool {
 const TOUCH_ID_VAR: &str = "LSV_TOUCH_ID";
 const TOUCH_ID_VAR_REASON: &str = "changing LSV_TOUCH_ID would bypass Touch ID approval";
 const NO_TOUCH_REASON: &str = "--no-touch skips Touch ID and is for your own terminal only";
-const NESTED_LSV_REASON: &str = "secret_run must not start lsv itself";
 
 fn strip_quotes(text: &str) -> String {
     text.chars().filter(|c| !matches!(c, '\'' | '"')).collect()
@@ -224,34 +221,6 @@ pub fn check_command(command: &str) -> Decision {
         }
     }
     Decision::Allow
-}
-
-/// Decides whether an MCP `secret_run` argv may run.
-///
-/// Applies the `lsv run` child rules to `argv` joined with spaces, with
-/// `vars` as the injected environment variable names. Also refuses any argv
-/// that starts `lsv` itself (which could use `--no-touch` or print what it
-/// injects) or mentions `LSV_TOUCH_ID`.
-#[must_use]
-pub fn check_run(argv: &[String], vars: &[&str]) -> Decision {
-    let command = argv.join(" ");
-    if command.contains(TOUCH_ID_VAR) || vars.iter().any(|v| v.contains(TOUCH_ID_VAR)) {
-        return Decision::Deny(TOUCH_ID_VAR_REASON.to_owned());
-    }
-    if argv.iter().any(|a| basename(first_word(a)) == "lsv")
-        || LSV_INVOKE.is_match(&strip_quotes(&command))
-    {
-        return Decision::Deny(NESTED_LSV_REASON.to_owned());
-    }
-    for (pattern, reason) in DIRECT_READS.iter() {
-        if pattern.is_match(&command) {
-            return Decision::Deny((*reason).to_owned());
-        }
-    }
-    match check_child(&command, vars) {
-        Some(reason) => Decision::Deny(reason),
-        None => Decision::Allow,
-    }
 }
 
 /// Evaluates a `PreToolUse` hook payload.

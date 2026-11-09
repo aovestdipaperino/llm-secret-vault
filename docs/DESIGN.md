@@ -41,7 +41,7 @@ the agent.
 A single binary `lsv` (crate `llm-secret-vault`) with three roles:
 
 - `lsv <subcommand>`: CLI for the human.
-- `lsv mcp`: stdio MCP server launched by Claude Code.
+- `lsv mcp`: management-only stdio MCP server launched by the host.
 - `lsv hook`: `PreToolUse` hook for the shell tool (Claude Code `Bash`, plank `bash`).
 
 No daemon, no own storage format for values: storage, encryption and locking
@@ -66,6 +66,9 @@ nothing for the hook to enforce).
    source and timestamps. The fingerprint is the first 8 hex chars of
    HMAC-SHA256(value) keyed with a per-installation key, so it cannot be used
    to brute-force short values offline without the key.
+5. **No agent execution through MCP.** The server exposes management tools
+   only. Secret use goes through the host's shell to `lsv run`, so `lsv` adds
+   secret injection without adding a route around the host's hook or sandbox.
 
 ## Modules
 
@@ -79,9 +82,9 @@ nothing for the hook to enforce).
 | `import` | Hidden interactive prompt, entered twice; refuses without a TTY. CLI only. | rpassword, backend, index |
 | `inject` | Parse references, resolve, spawn child, collect output through `redact`, enforce timeout and output cap. | backend, redact |
 | `redact` | Streaming replacement of each value with `«redacted:name»`. Covers raw, base64 (standard and URL-safe, padded and unpadded, plus the base64 prefix of complete 3-byte groups so a secret followed by other bytes in a blob is still caught), percent-encoding (uppercase `%XX`), the JSON string-escaped form of the value, and hex (lower and upper). Correct across read-chunk boundaries; overlapping or touching matches merge into one span. Not covered: base64 of a secret at a non-zero offset inside a larger blob, and deliberate transformations. | none |
-| `mcp` | Hand-written JSON-RPC 2.0 over stdio (initialize, tools/list, tools/call) with serde. | all core modules |
-| `approve` | `Approver` trait consulted before secrets are injected. `LSV_TOUCH_ID` selects the mode: `off`, `mcp` (MCP `secret_run` only) or `all` (default, also `lsv run`); `lsv run --no-touch` skips approval for one run at the human's terminal. On macOS `TouchId` evaluates `LAPolicy::DeviceOwnerAuthentication` through LocalAuthentication (Touch ID, falling back to the login password) with the reason `run "<cmd>" with secrets <a, b>`: argv joined, whitespace runs collapsed to one space, cut to 80 characters plus `…`, placeholders unexpanded, names sorted, never a value. It blocks on the reply block through a channel for up to 120 s, then invalidates the context; denial or cancel fails with `Touch ID approval was denied or cancelled`. `Approver::approve` receives the reason and the set of secret names; `Cached` remembers an approval instant per name and skips the prompt only when every requested name was approved within `LSV_TOUCH_ID_TTL` seconds (default 300, max 3600, 0 asks every time; failures are not cached). Other platforms print a notice and allow. Asked only when secrets are referenced, after `RunRequest::validate` (non-empty argv, valid env var names) and after their names are known to exist. It cannot replace the Keychain password dialog: biometric access control needs the data-protection keychain, a Developer ID signature and entitlements, which a `cargo install` build lacks, and "Always Allow" is tied to the exact binary so it asks again after each rebuild. | block2, objc2, objc2-foundation, objc2-local-authentication (macOS only) |
-| `hook` | Parse `PreToolUse` JSON, apply deny rules; the CLI blocks with exit 2 and the reason on stderr. Also refuses any command containing `--no-touch` or mentioning `LSV_TOUCH_ID`. `check_run` applies the child rules to an MCP `secret_run` argv and also refuses an argv that starts `lsv` or mentions `LSV_TOUCH_ID`. | none |
+| `mcp` | Hand-written JSON-RPC 2.0 over stdio (initialize, tools/list, tools/call) with serde. Exposes only secret management; its instructions route secret use through the host's shell to `lsv run`. | capture, generate, vault |
+| `approve` | `Approver` trait consulted before CLI secrets are injected. `LSV_TOUCH_ID` selects `off` or `all` (default); the removed `mcp` value is rejected and `LSV_TOUCH_ID_TTL` has no effect. `lsv run --no-touch` skips approval for one run at the human's terminal. On macOS `TouchId` evaluates `LAPolicy::DeviceOwnerAuthentication` through LocalAuthentication (Touch ID, falling back to the login password) with the reason `run "<cmd>" with secrets <a, b>`: argv joined, whitespace runs collapsed to one space, cut to 80 characters plus `…`, placeholders unexpanded, names sorted, never a value. It blocks on the reply block through a channel for up to 120 s, then invalidates the context; denial or cancel fails with `Touch ID approval was denied or cancelled`. Each CLI invocation is a fresh process with no approval cache. Other platforms print a notice and allow. Asked only when secrets are referenced, after `RunRequest::validate` (non-empty argv, valid env var names) and after their names are known to exist. It cannot replace the Keychain password dialog: biometric access control needs the data-protection keychain, a Developer ID signature and entitlements, which a `cargo install` build lacks, and "Always Allow" is tied to the exact binary so it asks again after each rebuild. | block2, objc2, objc2-foundation, objc2-local-authentication (macOS only) |
+| `hook` | Parse `PreToolUse` JSON, apply deny rules to `lsv run` in the host's shell command; the CLI blocks with exit 2 and the reason on stderr. Also refuses any command containing `--no-touch` or mentioning `LSV_TOUCH_ID`. | none |
 | `cli` | clap subcommands. | all core modules |
 
 Keyring entries use service `llm-secret-vault` and the secret name as account.
@@ -96,20 +99,23 @@ reserved.
 | `secret_info` | `name` | one metadata record |
 | `secret_capture` | `name`, `user?`, `host?`, `overwrite?=false`, `expect_prefix?`, `min_len?=8`, `allow_multiline?=false` | `stored <name>: <len> chars, fp <fp>, clipboard cleared` |
 | `secret_generate` | `name`, `user?`, `host?`, `length?=32`, `alphabet?=alnum` (`alnum`, `hex`, `base64url`, `printable`), `overwrite?=false` | `stored <name>: <len> chars, fp <fp>` |
-| `secret_run` | `argv[]`, `env?{VAR: name}`, `cwd?`, `timeout_s?=120` (1..=3600), `max_output_kb?=32` (1..=1024) | `exit_code`, `stdout`, `stderr` (redacted), `truncated`, `timed_out` |
 
 Rotation is `secret_generate` or `secret_capture` with `overwrite: true`.
-`delete` is CLI-only so the agent cannot destroy secrets. `secret_run` takes an
-argv array rather than a shell string; `{{name}}` placeholders may appear in
-any argv element. Unknown names fail before anything is spawned. Placeholders are substituted in
-every argv element including the program; any `{{word}}` whose inner text is a
-valid name is a reference (there is no escape syntax). At the timeout the whole
-process group is killed, including background processes the command left
-behind, and `run` waits up to the timeout plus one second. On Windows the
-process-group kill does not exist, so a timeout kills the child but not its
-grandchildren. The output cap also bounds the raw bytes fed into the redactor;
-when output is truncated, pending bytes are dropped rather than flushed
-unredacted.
+`delete` is CLI-only so the agent cannot destroy secrets. There is no MCP
+execution tool: the server instructions tell the agent to invoke `lsv run`
+through the host's normal shell, where the hook and execution policy cover
+the child, including the host sandbox when enabled.
+
+For `lsv run`, `{{name}}` placeholders may appear in any argv element.
+Unknown names fail before anything is spawned. Placeholders are substituted
+in every argv element including the program; any `{{word}}` whose inner text
+is a valid name is a reference (there is no escape syntax). The CLI uses a
+120-second timeout and a 32 KiB output cap. At the timeout the whole process
+group is killed, including background processes the command left behind, and
+`run` waits up to the timeout plus one second. On Windows the process-group
+kill does not exist, so a timeout kills the child but not its grandchildren.
+The output cap also bounds the raw bytes fed into the redactor; when output
+is truncated, pending bytes are dropped rather than flushed unredacted.
 
 A secret's user is optional, non-secret metadata validated by `SecretUser` (1-128 characters, no whitespace, control, invisible or bidirectional formatting characters, no `{{` or `}}`). A user equal to the secret value is refused. Overwrite without a user keeps the existing one. No MCP tool changes it on its own: an agent can only change it by overwriting the value, while `lsv user` changes it alone from the CLI.
 
@@ -137,8 +143,8 @@ lsv setup claude             # prints `claude mcp add` command and hook JSON
 lsv setup plank              # prints ~/.plank/.mcp.json and hooks.json entries
 ```
 
-`lsv run` from the human's shell redacts output too, so pasting terminal
-output into a chat stays safe.
+`lsv run` redacts output before returning it to the host shell, so neither
+agent transcripts nor terminal output intentionally receive a secret value.
 
 ## Clipboard capture flow
 
@@ -188,33 +194,22 @@ matches:
   with `/pass`, PowerShell `Get-StoredCredential`.
 - Reading `/proc/*/environ`.
 
-MCP `secret_run` arguments never pass through the hook, so the server applies
-the same rules itself through `hook::check_run(argv, vars)`, with the argv
-joined by spaces as the shell text and the `env` keys as the injected
-variables. It runs before anything is resolved; a match fails the call with
-`ErrorKind::Denied` and the message `refused by llm-secret-vault: <reason>`,
-and nothing is spawned. `check_run` also refuses an argv that invokes `lsv`
-(any word whose basename is `lsv`, or `lsv` as a command word inside a shell
-body): `secret_run must not start lsv itself`, since a nested `lsv run` could
-pass `--no-touch` or apply none of these rules; and an argv or `env` key
-mentioning `LSV_TOUCH_ID`. `lsv run` from the CLI is not checked this way; the
-Bash hook covers agents that use it through the shell.
+The MCP server has no execution tool, so every agent `lsv run` reaches this
+hook through the host's shell. The server instructions also tell the agent
+not to retry a refused or denied run and to ask the user instead.
 
 After the guard, request validation and the check that every referenced name
-exists, the `approve` step runs: with `LSV_TOUCH_ID` at `all` (default) or
-`mcp` on macOS it shows a Touch ID prompt naming the command and the secrets,
-never their values, and a denial or cancel refuses the run with
-`Touch ID approval was denied or cancelled`. By default every secret use asks:
-the MCP server remembers each approved name for `LSV_TOUCH_ID_TTL` seconds
-(default 300) inside its long-lived process, while each CLI `lsv run` is its
-own process and asks every time unless the human passes `--no-touch`. The
-protection assumes the guard hook is installed, since the hook is what stops
-an agent from using `--no-touch` or changing `LSV_TOUCH_ID`. For the MCP
-server set the variables where it is registered, for example
-`claude mcp add --scope user llm-secret-vault -e LSV_TOUCH_ID_TTL=600 -- lsv mcp`
-for Claude Code, or an `env` key on the server entry in plank's `.mcp.json`.
-The `secret_run` description and the server instructions tell the agent not
-to retry a refused or denied run and to ask the user instead.
+exists, the `approve` step runs: with `LSV_TOUCH_ID=all` (default) on macOS it
+shows a Touch ID prompt naming the command and the secrets, never their
+values, and a denial or cancel refuses the run with
+`Touch ID approval was denied or cancelled`. `off` disables the check; the
+old `mcp` value is rejected. Each CLI `lsv run` is its own process with no
+approval cache and asks every time unless the human passes `--no-touch`.
+`LSV_TOUCH_ID_TTL` has no effect. The protection assumes the guard hook is
+installed, since the hook is what stops an agent from using `--no-touch` or
+changing `LSV_TOUCH_ID`. For agent runs, `lsv run` reads the environment the
+host gives its shell tool; the management-only MCP server does not consult
+these approval settings.
 
 The hook is heuristic: quote stripping is approximate and it is a safety net,
 not a parser. Accepted gaps: any stdout redirect to a file counts as hiding
@@ -243,7 +238,7 @@ covers the macOS-over-SSH case without inspecting platform error codes.
 - `redact`: chunk-boundary splits, every encoding, overlapping and prefix
   secrets, empty and one-byte inputs.
 - Property test (proptest): with random values in `MemoryBackend` and a child
-  that prints arbitrary mixes of values and noise, no `secret_run` response
+  that prints arbitrary mixes of values and noise, no injected run's output
   contains any stored value in any covered encoding.
 - MCP: JSON-RPC request/response tests for every method and tool, including
   errors, each asserting no stored value appears in any response.

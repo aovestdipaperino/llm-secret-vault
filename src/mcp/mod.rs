@@ -7,7 +7,6 @@ use std::io::{BufRead, Write};
 
 use serde_json::{Value, json};
 
-use crate::approve::{AllowAll, Approver};
 use crate::capture::{Clipboard, SystemClipboard};
 use crate::error::Result;
 use crate::vault::Vault;
@@ -17,9 +16,10 @@ pub const PROTOCOL_VERSION: &str = "2025-06-18";
 
 const INSTRUCTIONS: &str = "Secrets are referenced by name and never returned. \
 When the user says a key or password is in the clipboard, call secret_capture. \
-Use secret_run to pass secrets to commands through env vars or {{name}} placeholders. \
+To use a secret, invoke `lsv run VAR=name -- command args...` through the host's normal shell tool (Bash in Claude Code, bash in plank); this server does not execute commands. \
+The shell tool's hook and execution policy apply to `lsv run` and its child. \
 Never ask the user to paste a secret into the chat. \
-If a run is refused or approval is denied, do not retry; ask the user.";
+If the shell hook or approval refuses a run, do not retry; ask the user.";
 
 /// Protocol versions this server can speak, newest first.
 pub const SUPPORTED_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
@@ -31,7 +31,6 @@ pub type ClipboardFactory = Box<dyn Fn() -> Result<Box<dyn Clipboard>> + Send + 
 pub struct Server {
     vault: Vault,
     clipboard: ClipboardFactory,
-    approver: Box<dyn Approver>,
 }
 
 impl fmt::Debug for Server {
@@ -54,18 +53,7 @@ impl Server {
     /// Creates a server using `clipboard` to reach the clipboard.
     #[must_use]
     pub fn new(vault: Vault, clipboard: ClipboardFactory) -> Self {
-        Self {
-            vault,
-            clipboard,
-            approver: Box::new(AllowAll),
-        }
-    }
-
-    /// Sets the approver consulted before secrets are injected.
-    #[must_use]
-    pub fn with_approver(mut self, approver: Box<dyn Approver>) -> Self {
-        self.approver = approver;
-        self
+        Self { vault, clipboard }
     }
 
     /// Creates a server that uses the system clipboard.
@@ -145,13 +133,7 @@ impl Server {
             .cloned()
             .unwrap_or_else(|| json!({}));
         Ok(
-            match tools::call(
-                &self.vault,
-                &self.clipboard,
-                self.approver.as_ref(),
-                name,
-                &args,
-            ) {
+            match tools::call(&self.vault, &self.clipboard, name, &args) {
                 Ok(text) => tool_result(&text, false),
                 Err(err) => tool_result(&err.to_string(), true),
             },

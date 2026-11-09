@@ -46,27 +46,22 @@ input that escaped, not marker text. The encodings produced by `variants`
 
 ## TLA+ model of approval
 
-`Approval.tla` models who can start a run (the agent through MCP or its shell
-tool, the human at a terminal), the approval mode, the MCP server's approval
-cache and its TTL, overwriting a secret, and the hook's refusal of
-`--no-touch` and of changes to the mode variable. Check it with TLC from
+`Approval.tla` models who can start a run (the agent through `lsv run` in its
+shell tool or the human at a terminal), the `off`/`all` approval mode,
+overwriting a secret, and the hook's refusal of `--no-touch` and of changes to
+the mode variable. The MCP server has no execution tool, so the model has no
+MCP run action, approval cache or TTL. Check it with TLC from
 [tla2tools.jar](https://github.com/tlaplus/tlaplus/releases):
 
 ```sh
 java -cp tla2tools.jar tlc2.TLC -config Approval.cfg Approval.tla
 ```
 
-`Approval.cfg` checks that every secret injected into a run the agent started,
-in a context the mode covers, was approved by the user in that run or within
-the TTL, that in mode `all` no agent run injects a secret without a user
-approval, and that no action hands a value to the agent. TLC explores about
-37,000 distinct states in a second.
-
-`Approval-gap.cfg` checks the stronger claim that the agent never injects a
-secret without a prompt unless the mode is `off`. It fails by design: in mode
-`mcp` the agent can run `lsv run` through its shell tool and no prompt is
-shown, which is the documented meaning of that mode. The counterexample is a
-one-step trace and is kept as a reminder of the trade-off.
+`Approval.cfg` checks that every secret injected into an agent run in mode
+`all` was approved in that exact run, that no such run relies on an older
+approval, and that no action hands a value to the agent. The old
+`Approval-gap.cfg` was removed with MCP execution: its counterexample depended
+on the former `mcp` approval mode.
 
 ## Markers and secrets that spell marker text
 
