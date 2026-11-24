@@ -1,5 +1,7 @@
 # llm-secret-vault
 
+[![GitHub stars](https://img.shields.io/github/stars/aovestdipaperino/llm-secret-vault?logo=github&color=brightgreen)](https://github.com/aovestdipaperino/llm-secret-vault/stargazers)
+
 <p align="center">
   <img src="assets/logo.png" alt="llm-secret-vault logo: a vault door with a terminal prompt at its centre" width="240">
 </p>
